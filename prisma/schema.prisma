@@ -1,0 +1,198 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator db {
+  provider = "go run github.com/steebchen/prisma-client-go"
+  output   = "./db"
+}
+
+
+model SchoolDetails {
+  id                     String           @id @default(uuid(7))
+  schoolCode             String           @unique
+  schoolName             String
+  board                  String?
+  state                  String?
+  district               String?
+  city                   String?
+  address                String?
+  pincode                String?
+  email                  String           @unique
+  phone                  String?
+  password               String
+  principalName          String?
+  
+  // Coordinator Details
+  coordinatorName        String?
+  coordinatorDesignation String?
+  coordinatorMobile      String?
+  coordinatorEmail       String?
+
+  // Activation, Verification & Security Fields
+  isActivated            Boolean          @default(false)
+  isVerified             Boolean          @default(false)
+  activationToken        String?
+  activationExpiry       DateTime?
+  otp                    String?
+  otpExpiry              DateTime?
+  msAuthSecret           String?
+  twoFactorEnable        Boolean          @default(false)
+  csrfID                 String?
+  sessionId              String?
+  ipAddress              String?
+  sessionExpiry          DateTime?
+  rememberMe             Boolean          @default(false)
+
+  // Timestamps
+  createdAt              DateTime         @default(now())
+  updatedAt              DateTime         @updatedAt
+  deletedAt              DateTime?
+
+  students                StudentDetails[]
+  technikPrideNominations TechnikPrideNomination[]
+  olympiadRegistrations   OlympiadRegistration[]
+}
+
+model StudentDetails {
+  id              String         @id @default(uuid(7))
+  studentName     String
+  email           String?        @unique
+  password        String?
+  phone           String?
+  grade           String
+  section         String?
+  rollNo          String?
+  parentName      String?
+  parentPhone     String?
+  address         String?
+  schoolId        String?
+  school          SchoolDetails? @relation(fields: [schoolId], references: [id])
+
+  // Activation, Verification & Security Fields
+  isActivated     Boolean        @default(false)
+  isVerified      Boolean        @default(false)
+  activationToken String?
+  activationExpiry DateTime?
+  otp             String?
+  otpExpiry       DateTime?
+  msAuthSecret    String?
+  twoFactorEnable Boolean        @default(false)
+  csrfID          String?
+  sessionId       String?
+  ipAddress       String?
+  sessionExpiry   DateTime?
+  rememberMe      Boolean        @default(false)
+
+  // Timestamps
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+  deletedAt       DateTime?
+}
+
+enum Role {
+  ADMIN
+  USER
+}
+
+model User {
+  id               String    @id @default(uuid(7))
+  name             String
+  email            String    @unique
+  password         String
+  role             Role      @default(USER)
+
+  // Activation, Verification & Security Fields
+  isActivated      Boolean   @default(false)
+  isVerified       Boolean   @default(false)
+  activationToken  String?
+  activationExpiry DateTime?
+  otp              String?
+  otpExpiry        DateTime?
+  msAuthSecret     String?
+  twoFactorEnable  Boolean   @default(false)
+  csrfID           String?
+  sessionId        String?
+  ipAddress        String?
+  sessionExpiry    DateTime?
+  rememberMe       Boolean   @default(false)
+
+  // Timestamps
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  deletedAt        DateTime?
+}
+
+model AuditLog {
+  id           String   @id @default(uuid(7))
+  method       String
+  path         String
+  userEmail    String?
+  ipAddress    String?
+  userAgent    String?
+  statusCode   Int
+  latencyMs    Int
+  requestBody  String?
+  responseBody String?
+  createdAt    DateTime @default(now())
+}
+
+model SessionLog {
+  id        String    @id @default(uuid(7))
+  userEmail String
+  sessionId String?
+  ipAddress String?
+  userAgent String?
+  action    String    // e.g. "LOGIN", "LOGOUT", "EXPIRED", "FAILED_LOGIN"
+  isActive  Boolean   @default(true)
+  loginAt   DateTime  @default(now())
+  logoutAt  DateTime?
+  createdAt DateTime  @default(now())
+}
+
+model TechnikPrideNomination {
+  id                  String         @id @default(uuid(7))
+  schoolId            String?
+  school              SchoolDetails? @relation(fields: [schoolId], references: [id])
+  academicYear        Int            @default(2026)
+
+  studentName         String
+  class               String
+  classCategory       String?        // e.g. "Grade 3 to 5 (Jr Level)", "Grade 6 to 8 (Senior Level)"
+  gender              String
+  achievementCategory String         // e.g. "Technik Pride Award - Academic"
+  achievementTitle    String         // Achievement / Talent Title
+  briefDescription    String         // Max 300 characters
+  supportingDocument  String?        // Upload certificate/photo URL or path
+
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+}
+
+model OlympiadRegistration {
+  id            String            @id @default(uuid(7))
+  schoolId      String?
+  school        SchoolDetails?    @relation(fields: [schoolId], references: [id])
+  academicYear  Int               @default(2026)
+  totalStudents Int               @default(0)
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+
+  students      OlympiadStudent[]
+}
+
+model OlympiadStudent {
+  id                     String               @id @default(uuid(7))
+  olympiadRegistrationId String
+  olympiadRegistration   OlympiadRegistration @relation(fields: [olympiadRegistrationId], references: [id], onDelete: Cascade)
+
+  studentName            String
+  class                  String
+  classCategory          String?              // e.g. "Grade 3 to 5 (Jr Level)", "Grade 6 to 8 (Senior Level)"
+  gender                 String
+  olympiadTrack          String               // e.g. "Robotics Olympiad"
+
+  createdAt              DateTime             @default(now())
+  updatedAt              DateTime             @updatedAt
+}

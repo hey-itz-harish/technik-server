@@ -1,0 +1,959 @@
+package handlers
+
+import (
+	"context"
+	"crypto/rand"
+	"fmt"
+	"net/http"
+	"strings"
+	"time"
+
+	"technik-server/config"
+	"technik-server/database"
+	"technik-server/dto"
+	"technik-server/mail"
+	"technik-server/middleware"
+	"technik-server/prisma/db"
+
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+	"golang.org/x/crypto/bcrypt"
+)
+
+type AuthHandler struct {
+	cfg         *config.Config
+	zohoService *mail.ZohoMailService
+}
+
+func NewAuthHandler(cfg *config.Config) *AuthHandler {
+	return &AuthHandler{
+		cfg:         cfg,
+		zohoService: mail.NewZohoMailService(cfg),
+	}
+}
+
+// GenerateSchoolCode generates a unique school code string like SCH-2026-TXI
+func GenerateSchoolCode() string {
+	year := time.Now().Year()
+	const charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	b := make([]byte, 3)
+	_, err := rand.Read(b)
+	if err != nil {
+		return fmt.Sprintf("SCH-%d-%03d", year, time.Now().UnixNano()%1000)
+	}
+
+	suffix := make([]byte, 3)
+	for i, v := range b {
+		suffix[i] = charset[int(v)%len(charset)]
+	}
+
+	return fmt.Sprintf("SCH-%d-%s", year, string(suffix))
+}
+
+// GenerateNumericOTP generates a 6-digit numeric OTP code
+func GenerateNumericOTP() string {
+	b := make([]byte, 3)
+	_, err := rand.Read(b)
+	if err != nil {
+		return fmt.Sprintf("%06d", time.Now().UnixNano()%1000000)
+	}
+	num := (int(b[0])<<16 | int(b[1])<<8 | int(b[2])) % 1000000
+	return fmt.Sprintf("%06d", num)
+}
+
+func parseSessionExpiry(t time.Time, ok bool) *time.Time {
+	if !ok || t.IsZero() {
+		return nil
+	}
+	return &t
+}
+
+// GetCSRFToken returns a valid CSRF token in the response payload
+func (h *AuthHandler) GetCSRFToken(c *gin.Context) {
+	token, _ := c.Cookie(middleware.CSRFCookieName)
+	if token == "" {
+		token = middleware.GenerateCSRFToken(h.cfg.CSRFSecret)
+		c.SetSameSite(http.SameSiteLaxMode)
+		c.SetCookie(
+			middleware.CSRFCookieName,
+			token,
+			86400,
+			"/",
+			h.cfg.CookieDomain,
+			h.cfg.CookieSecure,
+			false,
+		)
+	}
+
+	c.JSON(http.StatusOK, dto.CSRFResponse{
+		Success:   true,
+		CSRFToken: token,
+	})
+}
+
+// ActivateAccount handles account activation using token sent via email link
+func (h *AuthHandler) ActivateAccount(c *gin.Context) {
+	token := c.Query("token")
+	entityType := c.Query("type")
+
+	if token == "" {
+		var req dto.ActivateAccountRequest
+		if err := c.ShouldBind(&req); err == nil && req.Token != "" {
+			token = req.Token
+			if req.Type != "" {
+				entityType = req.Type
+			}
+		}
+	}
+
+	if token == "" {
+		c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: "Activation token is required"})
+		return
+	}
+
+	ctx := context.Background()
+	now := time.Now()
+
+	if entityType == "school" || entityType == "" {
+		school, err := database.Client.SchoolDetails.FindFirst(
+			db.SchoolDetails.ActivationToken.Equals(token),
+		).Exec(ctx)
+
+		if err == nil && school != nil {
+			exp, ok := school.ActivationExpiry()
+			if ok && exp.Before(now) {
+				c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: "Activation token has expired. Please request a new link."})
+				return
+			}
+
+			_, err = database.Client.SchoolDetails.FindUnique(
+				db.SchoolDetails.ID.Equals(school.ID),
+			).Update(
+				db.SchoolDetails.IsActivated.Set(true),
+				db.SchoolDetails.ActivationToken.Set(""),
+			).Exec(ctx)
+
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, dto.APIError{Success: false, Error: "Failed to activate school account"})
+				return
+			}
+
+			c.JSON(http.StatusOK, gin.H{
+				"success": true,
+				"message": "School account activated successfully! You can now login.",
+			})
+			return
+		}
+	}
+
+	if entityType == "student" || entityType == "" {
+		student, err := database.Client.StudentDetails.FindFirst(
+			db.StudentDetails.ActivationToken.Equals(token),
+		).Exec(ctx)
+
+		if err == nil && student != nil {
+			exp, ok := student.ActivationExpiry()
+			if ok && exp.Before(now) {
+				c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: "Activation token has expired. Please request a new link."})
+				return
+			}
+
+			_, err = database.Client.StudentDetails.FindUnique(
+				db.StudentDetails.ID.Equals(student.ID),
+			).Update(
+				db.StudentDetails.IsActivated.Set(true),
+				db.StudentDetails.ActivationToken.Set(""),
+			).Exec(ctx)
+
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, dto.APIError{Success: false, Error: "Failed to activate student account"})
+				return
+			}
+
+			c.JSON(http.StatusOK, gin.H{
+				"success": true,
+				"message": "Student account activated successfully! You can now login.",
+			})
+			return
+		}
+	}
+
+	c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: "Invalid activation token"})
+}
+
+// SendOTP generates and emails a 6-digit OTP code using Zoho Mail Service
+func (h *AuthHandler) SendOTP(c *gin.Context) {
+	var req dto.SendOTPRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: err.Error()})
+		return
+	}
+
+	ctx := context.Background()
+	otpCode := GenerateNumericOTP()
+	otpExpiry := time.Now().Add(10 * time.Minute)
+
+	var recipientName string
+
+	if req.Type == "school" {
+		school, err := database.Client.SchoolDetails.FindUnique(
+			db.SchoolDetails.Email.Equals(req.Email),
+		).Exec(ctx)
+
+		if err != nil || school == nil {
+			c.JSON(http.StatusNotFound, dto.APIError{Success: false, Error: "School with this email not found"})
+			return
+		}
+
+		if !school.IsActivated {
+			c.JSON(http.StatusForbidden, dto.APIError{Success: false, Error: "Account is not activated. Please activate your account using the email link before proceeding with MFA/OTP."})
+			return
+		}
+
+		recipientName = school.SchoolName
+
+		_, err = database.Client.SchoolDetails.FindUnique(
+			db.SchoolDetails.ID.Equals(school.ID),
+		).Update(
+			db.SchoolDetails.Otp.Set(otpCode),
+			db.SchoolDetails.OtpExpiry.Set(otpExpiry),
+		).Exec(ctx)
+
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, dto.APIError{Success: false, Error: "Failed to update OTP code"})
+			return
+		}
+	} else {
+		// Student OTP
+		student, err := database.Client.StudentDetails.FindFirst(
+			db.StudentDetails.Email.Equals(req.Email),
+		).Exec(ctx)
+
+		if err != nil || student == nil {
+			c.JSON(http.StatusNotFound, dto.APIError{Success: false, Error: "Student with this email not found"})
+			return
+		}
+
+		if !student.IsActivated {
+			c.JSON(http.StatusForbidden, dto.APIError{Success: false, Error: "Account is not activated. Please activate your account using the email link before proceeding with MFA/OTP."})
+			return
+		}
+
+		recipientName = student.StudentName
+
+		_, err = database.Client.StudentDetails.FindUnique(
+			db.StudentDetails.ID.Equals(student.ID),
+		).Update(
+			db.StudentDetails.Otp.Set(otpCode),
+			db.StudentDetails.OtpExpiry.Set(otpExpiry),
+		).Exec(ctx)
+
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, dto.APIError{Success: false, Error: "Failed to update OTP code"})
+			return
+		}
+	}
+
+	// Send OTP email via Zoho Mail Service
+	if err := h.zohoService.SendOTPEmail(req.Email, recipientName, otpCode); err != nil {
+		c.JSON(http.StatusInternalServerError, dto.APIError{Success: false, Error: "Failed to send OTP email: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "OTP code sent successfully to email",
+	})
+}
+
+// VerifyOTP validates the OTP code, updates isVerified: true, and issues session tokens/cookies
+func (h *AuthHandler) VerifyOTP(c *gin.Context) {
+	var req dto.VerifyOTPRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: err.Error()})
+		return
+	}
+
+	ctx := context.Background()
+	now := time.Now()
+	clientIP := c.ClientIP()
+
+	if req.Type == "school" {
+		school, err := database.Client.SchoolDetails.FindUnique(
+			db.SchoolDetails.Email.Equals(req.Email),
+		).Exec(ctx)
+
+		if err != nil || school == nil {
+			c.JSON(http.StatusNotFound, dto.APIError{Success: false, Error: "School not found"})
+			return
+		}
+
+		if !school.IsActivated {
+			c.JSON(http.StatusForbidden, dto.APIError{Success: false, Error: "Account is not activated. Please activate your account via email first."})
+			return
+		}
+
+		savedOtp, _ := school.Otp()
+		exp, ok := school.OtpExpiry()
+
+		if savedOtp == "" || savedOtp != req.OTP {
+			c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: "Invalid OTP code"})
+			return
+		}
+
+		if !ok || exp.Before(now) {
+			c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: "OTP code has expired. Please request a new OTP."})
+			return
+		}
+
+		jwtToken, err := middleware.GenerateJWT(school.ID, school.Email, "school", h.cfg.JWTSecret)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, dto.APIError{Success: false, Error: "Failed to generate token"})
+			return
+		}
+
+		sessionID := uuid.New().String()
+		csrfToken := middleware.GenerateCSRFToken(h.cfg.CSRFSecret)
+		sessionExpiry := now.Add(24 * time.Hour)
+
+		// Verification Success: Update DB fields (isVerified: true, session parameters)
+		updatedSchool, err := database.Client.SchoolDetails.FindUnique(
+			db.SchoolDetails.ID.Equals(school.ID),
+		).Update(
+			db.SchoolDetails.IsActivated.Set(true),
+			db.SchoolDetails.IsVerified.Set(true),
+			db.SchoolDetails.Otp.Set(""),
+			db.SchoolDetails.RememberMe.Set(req.RememberMe),
+			db.SchoolDetails.IPAddress.Set(clientIP),
+			db.SchoolDetails.SessionID.Set(sessionID),
+			db.SchoolDetails.CsrfID.Set(csrfToken),
+			db.SchoolDetails.SessionExpiry.Set(sessionExpiry),
+		).Exec(ctx)
+
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, dto.APIError{Success: false, Error: "Failed to update school verification status"})
+			return
+		}
+
+		c.SetSameSite(http.SameSiteLaxMode)
+		c.SetCookie(middleware.JWTCookieName, jwtToken, 86400, "/", h.cfg.CookieDomain, h.cfg.CookieSecure, true)
+		c.SetCookie(middleware.CSRFCookieName, csrfToken, 86400, "/", h.cfg.CookieDomain, h.cfg.CookieSecure, false)
+
+		board, _ := updatedSchool.Board()
+		state, _ := updatedSchool.State()
+		district, _ := updatedSchool.District()
+		city, _ := updatedSchool.City()
+		address, _ := updatedSchool.Address()
+		pincode, _ := updatedSchool.Pincode()
+		phone, _ := updatedSchool.Phone()
+		principal, _ := updatedSchool.PrincipalName()
+		coordName, _ := updatedSchool.CoordinatorName()
+		coordDesig, _ := updatedSchool.CoordinatorDesignation()
+		coordMob, _ := updatedSchool.CoordinatorMobile()
+		coordEmail, _ := updatedSchool.CoordinatorEmail()
+		cID, _ := updatedSchool.CsrfID()
+		sID, _ := updatedSchool.SessionID()
+		ip, _ := updatedSchool.IPAddress()
+		sExp := parseSessionExpiry(updatedSchool.SessionExpiry())
+
+		c.JSON(http.StatusOK, dto.SchoolAuthResponse{
+			Success: true,
+			Message: "OTP verification successful",
+			School: dto.SchoolResponse{
+				ID:                     updatedSchool.ID,
+				SchoolCode:             updatedSchool.SchoolCode,
+				SchoolName:             updatedSchool.SchoolName,
+				Email:                  updatedSchool.Email,
+				Board:                  board,
+				State:                  state,
+				District:               district,
+				City:                   city,
+				Address:                address,
+				Pincode:                pincode,
+				Phone:                  phone,
+				PrincipalName:          principal,
+				CoordinatorName:        coordName,
+				CoordinatorDesignation: coordDesig,
+				CoordinatorMobile:      coordMob,
+				CoordinatorEmail:       coordEmail,
+				TwoFactorEnable:        updatedSchool.TwoFactorEnable,
+				IsActivated:            updatedSchool.IsActivated,
+				IsVerified:             updatedSchool.IsVerified,
+				CSRFID:                 cID,
+				SessionID:              sID,
+				IPAddress:              ip,
+				RememberMe:             updatedSchool.RememberMe,
+				SessionExpiry:          sExp,
+				CreatedAt:              updatedSchool.CreatedAt,
+				UpdatedAt:              updatedSchool.UpdatedAt,
+			},
+			Token:     jwtToken,
+			CSRFToken: csrfToken,
+		})
+		return
+	}
+
+	// Student OTP Verification
+	student, err := database.Client.StudentDetails.FindFirst(
+		db.StudentDetails.Email.Equals(req.Email),
+	).With(db.StudentDetails.School.Fetch()).Exec(ctx)
+
+	if err != nil || student == nil {
+		c.JSON(http.StatusNotFound, dto.APIError{Success: false, Error: "Student not found"})
+		return
+	}
+
+	if !student.IsActivated {
+		c.JSON(http.StatusForbidden, dto.APIError{Success: false, Error: "Account is not activated. Please activate your account via email first."})
+		return
+	}
+
+	savedOtp, _ := student.Otp()
+	exp, ok := student.OtpExpiry()
+
+	if savedOtp == "" || savedOtp != req.OTP {
+		c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: "Invalid OTP code"})
+		return
+	}
+
+	if !ok || exp.Before(now) {
+		c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: "OTP code has expired. Please request a new OTP."})
+		return
+	}
+
+	email, _ := student.Email()
+	jwtToken, err := middleware.GenerateJWT(student.ID, email, "student", h.cfg.JWTSecret)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.APIError{Success: false, Error: "Failed to generate token"})
+		return
+	}
+
+	sessionID := uuid.New().String()
+	csrfToken := middleware.GenerateCSRFToken(h.cfg.CSRFSecret)
+	sessionExpiry := now.Add(24 * time.Hour)
+
+	updatedStudent, err := database.Client.StudentDetails.FindUnique(
+		db.StudentDetails.ID.Equals(student.ID),
+	).Update(
+		db.StudentDetails.IsActivated.Set(true),
+		db.StudentDetails.IsVerified.Set(true),
+		db.StudentDetails.Otp.Set(""),
+		db.StudentDetails.RememberMe.Set(req.RememberMe),
+		db.StudentDetails.IPAddress.Set(clientIP),
+		db.StudentDetails.SessionID.Set(sessionID),
+		db.StudentDetails.CsrfID.Set(csrfToken),
+		db.StudentDetails.SessionExpiry.Set(sessionExpiry),
+	).Exec(ctx)
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.APIError{Success: false, Error: "Failed to update student verification status"})
+		return
+	}
+
+	c.SetSameSite(http.SameSiteLaxMode)
+	c.SetCookie(middleware.JWTCookieName, jwtToken, 86400, "/", h.cfg.CookieDomain, h.cfg.CookieSecure, true)
+	c.SetCookie(middleware.CSRFCookieName, csrfToken, 86400, "/", h.cfg.CookieDomain, h.cfg.CookieSecure, false)
+
+	phone, _ := updatedStudent.Phone()
+	section, _ := updatedStudent.Section()
+	rollNo, _ := updatedStudent.RollNo()
+	parentName, _ := updatedStudent.ParentName()
+	parentPhone, _ := updatedStudent.ParentPhone()
+	cID, _ := updatedStudent.CsrfID()
+	sID, _ := updatedStudent.SessionID()
+	ip, _ := updatedStudent.IPAddress()
+	sExp := parseSessionExpiry(updatedStudent.SessionExpiry())
+
+	c.JSON(http.StatusOK, dto.StudentAuthResponse{
+		Success: true,
+		Message: "OTP verification successful",
+		Student: dto.StudentResponse{
+			ID:              updatedStudent.ID,
+			StudentName:     updatedStudent.StudentName,
+			Email:           email,
+			Phone:           phone,
+			Grade:           updatedStudent.Grade,
+			Section:         section,
+			RollNo:          rollNo,
+			ParentName:      parentName,
+			ParentPhone:     parentPhone,
+			TwoFactorEnable: updatedStudent.TwoFactorEnable,
+			IsActivated:     updatedStudent.IsActivated,
+			IsVerified:      updatedStudent.IsVerified,
+			CSRFID:          cID,
+			SessionID:       sID,
+			IPAddress:       ip,
+			RememberMe:      updatedStudent.RememberMe,
+			SessionExpiry:   sExp,
+			CreatedAt:       updatedStudent.CreatedAt,
+			UpdatedAt:       updatedStudent.UpdatedAt,
+		},
+		Token:     jwtToken,
+		CSRFToken: csrfToken,
+	})
+}
+
+// RegisterSchool registers a new school with isActivated: false and sends activation email link
+func (h *AuthHandler) RegisterSchool(c *gin.Context) {
+	var req dto.SchoolRegisterRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: err.Error()})
+		return
+	}
+
+	ctx := context.Background()
+
+	existing, err := database.Client.SchoolDetails.FindUnique(
+		db.SchoolDetails.Email.Equals(req.Email),
+	).Exec(ctx)
+
+	if err == nil && existing != nil {
+		c.JSON(http.StatusConflict, dto.APIError{Success: false, Error: "School with this email already exists"})
+		return
+	}
+
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.APIError{Success: false, Error: "Failed to hash password"})
+		return
+	}
+
+	var schoolCode string
+	for i := 0; i < 5; i++ {
+		code := GenerateSchoolCode()
+		chk, _ := database.Client.SchoolDetails.FindUnique(
+			db.SchoolDetails.SchoolCode.Equals(code),
+		).Exec(ctx)
+		if chk == nil {
+			schoolCode = code
+			break
+		}
+	}
+	if schoolCode == "" {
+		schoolCode = GenerateSchoolCode()
+	}
+
+	phoneNum := req.Phone
+	if phoneNum == "" {
+		phoneNum = req.SchoolMobile
+	}
+
+	activationToken := uuid.New().String()
+	activationExpiry := time.Now().Add(24 * time.Hour)
+
+	newSchool, err := database.Client.SchoolDetails.CreateOne(
+		db.SchoolDetails.SchoolCode.Set(schoolCode),
+		db.SchoolDetails.SchoolName.Set(req.SchoolName),
+		db.SchoolDetails.Email.Set(req.Email),
+		db.SchoolDetails.Password.Set(string(hashedPassword)),
+		db.SchoolDetails.Board.Set(req.Board),
+		db.SchoolDetails.State.Set(req.State),
+		db.SchoolDetails.District.Set(req.District),
+		db.SchoolDetails.City.Set(req.City),
+		db.SchoolDetails.Address.Set(req.Address),
+		db.SchoolDetails.Pincode.Set(req.Pincode),
+		db.SchoolDetails.Phone.Set(phoneNum),
+		db.SchoolDetails.PrincipalName.Set(req.PrincipalName),
+		db.SchoolDetails.CoordinatorName.Set(req.CoordinatorName),
+		db.SchoolDetails.CoordinatorDesignation.Set(req.CoordinatorDesignation),
+		db.SchoolDetails.CoordinatorMobile.Set(req.CoordinatorMobile),
+		db.SchoolDetails.CoordinatorEmail.Set(req.CoordinatorEmail),
+		db.SchoolDetails.IsActivated.Set(false),
+		db.SchoolDetails.IsVerified.Set(false),
+		db.SchoolDetails.ActivationToken.Set(activationToken),
+		db.SchoolDetails.ActivationExpiry.Set(activationExpiry),
+	).Exec(ctx)
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.APIError{Success: false, Error: "Failed to register school: " + err.Error()})
+		return
+	}
+
+	// Send activation email link via Zoho Mail Service
+	_ = h.zohoService.SendActivationEmail(req.Email, req.SchoolName, activationToken, "school")
+
+	board, _ := newSchool.Board()
+	state, _ := newSchool.State()
+	district, _ := newSchool.District()
+	city, _ := newSchool.City()
+	address, _ := newSchool.Address()
+	pincode, _ := newSchool.Pincode()
+	phone, _ := newSchool.Phone()
+	principal, _ := newSchool.PrincipalName()
+	coordName, _ := newSchool.CoordinatorName()
+	coordDesig, _ := newSchool.CoordinatorDesignation()
+	coordMob, _ := newSchool.CoordinatorMobile()
+	coordEmail, _ := newSchool.CoordinatorEmail()
+
+	c.JSON(http.StatusCreated, dto.SchoolAuthResponse{
+		Success: true,
+		Message: "School registered successfully. An activation link has been sent to your email. Please click the link to activate your account before logging in.",
+		School: dto.SchoolResponse{
+			ID:                     newSchool.ID,
+			SchoolCode:             newSchool.SchoolCode,
+			SchoolName:             newSchool.SchoolName,
+			Email:                  newSchool.Email,
+			Board:                  board,
+			State:                  state,
+			District:               district,
+			City:                   city,
+			Address:                address,
+			Pincode:                pincode,
+			Phone:                  phone,
+			PrincipalName:          principal,
+			CoordinatorName:        coordName,
+			CoordinatorDesignation: coordDesig,
+			CoordinatorMobile:      coordMob,
+			CoordinatorEmail:       coordEmail,
+			TwoFactorEnable:        newSchool.TwoFactorEnable,
+			IsActivated:            newSchool.IsActivated,
+			IsVerified:             newSchool.IsVerified,
+			CreatedAt:              newSchool.CreatedAt,
+			UpdatedAt:              newSchool.UpdatedAt,
+		},
+	})
+}
+
+// LoginSchool authenticates school. Fails if isActivated is false.
+func (h *AuthHandler) LoginSchool(c *gin.Context) {
+	var req dto.SchoolLoginRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: err.Error()})
+		return
+	}
+
+	ctx := context.Background()
+	school, err := database.Client.SchoolDetails.FindUnique(
+		db.SchoolDetails.Email.Equals(req.Email),
+	).Exec(ctx)
+
+	if err != nil || school == nil {
+		c.JSON(http.StatusUnauthorized, dto.APIError{Success: false, Error: "Invalid email or password"})
+		return
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(school.Password), []byte(req.Password)); err != nil {
+		c.JSON(http.StatusUnauthorized, dto.APIError{Success: false, Error: "Invalid email or password"})
+		return
+	}
+
+	// Block login attempt if account is not activated
+	if !school.IsActivated {
+		c.JSON(http.StatusForbidden, dto.APIError{
+			Success: false,
+			Error:   "Account is not activated. Please activate your account using the activation link sent to your email.",
+		})
+		return
+	}
+
+	clientIP := c.ClientIP()
+	jwtToken, err := middleware.GenerateJWT(school.ID, school.Email, "school", h.cfg.JWTSecret)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.APIError{Success: false, Error: "Failed to generate token"})
+		return
+	}
+
+	var csrfToken, sessionID string
+	var sessionExpiry time.Time
+	var updatedSchool *db.SchoolDetailsModel
+
+	if req.RememberMe {
+		sessionID = uuid.New().String()
+		csrfToken = middleware.GenerateCSRFToken(h.cfg.CSRFSecret)
+		sessionExpiry = time.Now().Add(24 * time.Hour) // 1 Day Expiry
+
+		updatedSchool, err = database.Client.SchoolDetails.FindUnique(
+			db.SchoolDetails.ID.Equals(school.ID),
+		).Update(
+			db.SchoolDetails.RememberMe.Set(true),
+			db.SchoolDetails.IPAddress.Set(clientIP),
+			db.SchoolDetails.SessionID.Set(sessionID),
+			db.SchoolDetails.CsrfID.Set(csrfToken),
+			db.SchoolDetails.SessionExpiry.Set(sessionExpiry),
+		).Exec(ctx)
+
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, dto.APIError{Success: false, Error: "Failed to establish remember me session"})
+			return
+		}
+
+		c.SetSameSite(http.SameSiteLaxMode)
+		c.SetCookie(middleware.JWTCookieName, jwtToken, 86400, "/", h.cfg.CookieDomain, h.cfg.CookieSecure, true)
+		c.SetCookie(middleware.CSRFCookieName, csrfToken, 86400, "/", h.cfg.CookieDomain, h.cfg.CookieSecure, false)
+	} else {
+		csrfToken = middleware.GenerateCSRFToken(h.cfg.CSRFSecret)
+		updatedSchool, _ = database.Client.SchoolDetails.FindUnique(
+			db.SchoolDetails.ID.Equals(school.ID),
+		).Update(
+			db.SchoolDetails.RememberMe.Set(false),
+			db.SchoolDetails.IPAddress.Set(clientIP),
+		).Exec(ctx)
+
+		c.SetSameSite(http.SameSiteLaxMode)
+		c.SetCookie(middleware.JWTCookieName, jwtToken, 0, "/", h.cfg.CookieDomain, h.cfg.CookieSecure, true)
+		c.SetCookie(middleware.CSRFCookieName, csrfToken, 0, "/", h.cfg.CookieDomain, h.cfg.CookieSecure, false)
+	}
+
+	if updatedSchool != nil {
+		school = updatedSchool
+	}
+
+	board, _ := school.Board()
+	state, _ := school.State()
+	district, _ := school.District()
+	city, _ := school.City()
+	address, _ := school.Address()
+	pincode, _ := school.Pincode()
+	phone, _ := school.Phone()
+	principal, _ := school.PrincipalName()
+	coordName, _ := school.CoordinatorName()
+	coordDesig, _ := school.CoordinatorDesignation()
+	coordMob, _ := school.CoordinatorMobile()
+	coordEmail, _ := school.CoordinatorEmail()
+	cID, _ := school.CsrfID()
+	sID, _ := school.SessionID()
+	ip, _ := school.IPAddress()
+	sExp := parseSessionExpiry(school.SessionExpiry())
+
+	// Log Session creation
+	_, _ = database.Client.SessionLog.CreateOne(
+		db.SessionLog.UserEmail.Set(school.Email),
+		db.SessionLog.Action.Set("LOGIN"),
+		db.SessionLog.IsActive.Set(true),
+		db.SessionLog.IPAddress.Set(clientIP),
+		db.SessionLog.UserAgent.Set(c.Request.UserAgent()),
+		db.SessionLog.SessionID.Set(sessionID),
+	).Exec(ctx)
+
+	c.JSON(http.StatusOK, dto.SchoolAuthResponse{
+		Success: true,
+		Message: "School login successful",
+		School: dto.SchoolResponse{
+			ID:                     school.ID,
+			SchoolCode:             school.SchoolCode,
+			SchoolName:             school.SchoolName,
+			Email:                  school.Email,
+			Board:                  board,
+			State:                  state,
+			District:               district,
+			City:                   city,
+			Address:                address,
+			Pincode:                pincode,
+			Phone:                  phone,
+			PrincipalName:          principal,
+			CoordinatorName:        coordName,
+			CoordinatorDesignation: coordDesig,
+			CoordinatorMobile:      coordMob,
+			CoordinatorEmail:       coordEmail,
+			TwoFactorEnable:        school.TwoFactorEnable,
+			IsActivated:            school.IsActivated,
+			IsVerified:             school.IsVerified,
+			CSRFID:                 cID,
+			SessionID:              sID,
+			IPAddress:              ip,
+			RememberMe:             school.RememberMe,
+			SessionExpiry:          sExp,
+			CreatedAt:              school.CreatedAt,
+			UpdatedAt:              school.UpdatedAt,
+		},
+		Token:     jwtToken,
+		CSRFToken: csrfToken,
+	})
+}
+
+// Logout clears auth cookies, resets session by userEmail, and creates a SessionLog entry
+func (h *AuthHandler) Logout(c *gin.Context) {
+	var req dto.LogoutRequest
+	_ = c.ShouldBindJSON(&req)
+
+	userEmail := req.Email
+	if userEmail == "" {
+		userEmail = c.Query("email")
+	}
+
+	ctx := context.Background()
+	clientIP := c.ClientIP()
+	userAgent := c.Request.UserAgent()
+
+	cookieToken, err := c.Cookie(middleware.JWTCookieName)
+	if err != nil || cookieToken == "" {
+		authHeader := c.GetHeader("Authorization")
+		if strings.HasPrefix(authHeader, "Bearer ") {
+			cookieToken = strings.TrimPrefix(authHeader, "Bearer ")
+		}
+	}
+
+	if cookieToken != "" {
+		claims, err := middleware.ValidateJWT(cookieToken, h.cfg.JWTSecret)
+		if err == nil && claims != nil {
+			if userEmail == "" {
+				userEmail = claims.Email
+			}
+			if claims.Role == "school" {
+				_, _ = database.Client.SchoolDetails.FindUnique(
+					db.SchoolDetails.ID.Equals(claims.UserID),
+				).Update(
+					db.SchoolDetails.IsVerified.Set(false),
+					db.SchoolDetails.SessionID.Set(""),
+					db.SchoolDetails.CsrfID.Set(""),
+					db.SchoolDetails.RememberMe.Set(false),
+				).Exec(ctx)
+			} else {
+				_, _ = database.Client.User.FindUnique(
+					db.User.ID.Equals(claims.UserID),
+				).Update(
+					db.User.IsVerified.Set(false),
+					db.User.SessionID.Set(""),
+					db.User.CsrfID.Set(""),
+					db.User.RememberMe.Set(false),
+				).Exec(ctx)
+			}
+		}
+	}
+
+	if userEmail != "" {
+		// Deactivate active session flags by userEmail
+		_, _ = database.Client.SchoolDetails.FindUnique(
+			db.SchoolDetails.Email.Equals(userEmail),
+		).Update(
+			db.SchoolDetails.IsVerified.Set(false),
+			db.SchoolDetails.SessionID.Set(""),
+			db.SchoolDetails.CsrfID.Set(""),
+			db.SchoolDetails.RememberMe.Set(false),
+		).Exec(ctx)
+
+		_, _ = database.Client.User.FindUnique(
+			db.User.Email.Equals(userEmail),
+		).Update(
+			db.User.IsVerified.Set(false),
+			db.User.SessionID.Set(""),
+			db.User.CsrfID.Set(""),
+			db.User.RememberMe.Set(false),
+		).Exec(ctx)
+
+		// Record SessionLog logout entry
+		now := time.Now()
+		_, _ = database.Client.SessionLog.CreateOne(
+			db.SessionLog.UserEmail.Set(userEmail),
+			db.SessionLog.Action.Set("LOGOUT"),
+			db.SessionLog.IsActive.Set(false),
+			db.SessionLog.LogoutAt.Set(now),
+			db.SessionLog.IPAddress.Set(clientIP),
+			db.SessionLog.UserAgent.Set(userAgent),
+		).Exec(ctx)
+	}
+
+	c.SetCookie(middleware.JWTCookieName, "", -1, "/", h.cfg.CookieDomain, h.cfg.CookieSecure, true)
+	c.SetCookie(middleware.CSRFCookieName, "", -1, "/", h.cfg.CookieDomain, h.cfg.CookieSecure, false)
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "Logged out successfully",
+	})
+}
+
+// GetMe retrieves profile for School or User depending on JWT context
+func (h *AuthHandler) GetMe(c *gin.Context) {
+	userIDVal, exists := c.Get("userId")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, dto.APIError{Success: false, Error: "Unauthorized context"})
+		return
+	}
+	userID := userIDVal.(string)
+
+	userRoleVal, _ := c.Get("userRole")
+	userRole, _ := userRoleVal.(string)
+
+	ctx := context.Background()
+
+	if userRole == "school" {
+		school, err := database.Client.SchoolDetails.FindUnique(
+			db.SchoolDetails.ID.Equals(userID),
+		).Exec(ctx)
+
+		if err != nil || school == nil {
+			c.JSON(http.StatusNotFound, dto.APIError{Success: false, Error: "School profile not found"})
+			return
+		}
+
+		board, _ := school.Board()
+		state, _ := school.State()
+		district, _ := school.District()
+		city, _ := school.City()
+		address, _ := school.Address()
+		pincode, _ := school.Pincode()
+		phone, _ := school.Phone()
+		principal, _ := school.PrincipalName()
+		coordName, _ := school.CoordinatorName()
+		coordDesig, _ := school.CoordinatorDesignation()
+		coordMob, _ := school.CoordinatorMobile()
+		coordEmail, _ := school.CoordinatorEmail()
+		cID, _ := school.CsrfID()
+		sID, _ := school.SessionID()
+		ip, _ := school.IPAddress()
+		sExp := parseSessionExpiry(school.SessionExpiry())
+
+		c.JSON(http.StatusOK, dto.SchoolResponse{
+			ID:                     school.ID,
+			SchoolCode:             school.SchoolCode,
+			SchoolName:             school.SchoolName,
+			Email:                  school.Email,
+			Board:                  board,
+			State:                  state,
+			District:               district,
+			City:                   city,
+			Address:                address,
+			Pincode:                pincode,
+			Phone:                  phone,
+			PrincipalName:          principal,
+			CoordinatorName:        coordName,
+			CoordinatorDesignation: coordDesig,
+			CoordinatorMobile:      coordMob,
+			CoordinatorEmail:       coordEmail,
+			TwoFactorEnable:        school.TwoFactorEnable,
+			IsActivated:            school.IsActivated,
+			IsVerified:             school.IsVerified,
+			CSRFID:                 cID,
+			SessionID:              sID,
+			IPAddress:              ip,
+			RememberMe:             school.RememberMe,
+			SessionExpiry:          sExp,
+			CreatedAt:              school.CreatedAt,
+			UpdatedAt:              school.UpdatedAt,
+		})
+		return
+	}
+
+	// User Profile Lookup
+	user, err := database.Client.User.FindUnique(
+		db.User.ID.Equals(userID),
+	).Exec(ctx)
+
+	if err != nil || user == nil {
+		c.JSON(http.StatusNotFound, dto.APIError{Success: false, Error: "User profile not found"})
+		return
+	}
+
+	cID, _ := user.CsrfID()
+	sID, _ := user.SessionID()
+	ip, _ := user.IPAddress()
+	sExp := parseSessionExpiry(user.SessionExpiry())
+
+	c.JSON(http.StatusOK, dto.UserResponse{
+		ID:              user.ID,
+		Name:            user.Name,
+		Email:           user.Email,
+		Role:            string(user.Role),
+		TwoFactorEnable: user.TwoFactorEnable,
+		IsActivated:     user.IsActivated,
+		IsVerified:      user.IsVerified,
+		CSRFID:          cID,
+		SessionID:       sID,
+		IPAddress:       ip,
+		RememberMe:      user.RememberMe,
+		SessionExpiry:   sExp,
+		CreatedAt:       user.CreatedAt,
+		UpdatedAt:       user.UpdatedAt,
+	})
+}
+

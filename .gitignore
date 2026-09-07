@@ -1,0 +1,6 @@
+# Executables
+*.exe
+technik-server.exe
+
+# Environment
+.env
