@@ -17,14 +17,16 @@ func NewZohoMailService(cfg *config.Config) *ZohoMailService {
 	return &ZohoMailService{cfg: cfg}
 }
 
-// SendActivationEmail sends an account activation link via Zoho Mail SMTP
-func (z *ZohoMailService) SendActivationEmail(toEmail, recipientName, activationToken, entityType string) error {
-	activationLink := fmt.Sprintf("http://localhost:8080/api/auth/activate?token=%s&type=%s", activationToken, entityType)
-
+// SendActivationEmail sends an account activation link via Zoho Mail SMTP.
+// activationLink is the primary CTA (points at the frontend SPA, valid ~24h).
+// resendLink is a secondary link (points at the backend directly, valid ~7 days)
+// that lets the recipient get a fresh activation link even after the primary
+// one has expired.
+func (z *ZohoMailService) SendActivationEmail(toEmail, recipientName, activationLink, resendLink string) error {
 	if z.cfg.ZohoUser == "" || z.cfg.ZohoPass == "" {
 		logger.Error("Zoho SMTP credentials not configured in .env (ZOHO_SMTP_USER & ZOHO_SMTP_PASS required)")
 		logger.Info("--------------------------------------------------")
-		logger.Info("[DEV MOCK ACTIVATION LINK] To: %s (%s) | Link: %s", toEmail, recipientName, activationLink)
+		logger.Info("[DEV MOCK ACTIVATION LINK] To: %s (%s) | Link: %s | Resend Link: %s", toEmail, recipientName, activationLink, resendLink)
 		logger.Info("--------------------------------------------------")
 		return nil
 	}
@@ -62,13 +64,17 @@ func (z *ZohoMailService) SendActivationEmail(toEmail, recipientName, activation
       ⏰ This activation link is valid for <strong>24 hours</strong>. Without activation, login and MFA setup will remain disabled.
     </p>
     <hr style="border: none; border-top: 1px solid #f1f5f9; margin: 25px 0;">
+    <p style="color: #64748b; font-size: 12px; line-height: 1.5; text-align: center;">
+      Link expired? <a href="%s" style="color: #ea580c; font-weight: bold;">Click here to resend the activation email</a>.
+    </p>
+    <hr style="border: none; border-top: 1px solid #f1f5f9; margin: 25px 0;">
     <p style="font-size: 12px; color: #94a3b8; text-align: center; margin: 0;">
       © 2026 Technik Olympiad Private Limited. All rights reserved.
     </p>
   </div>
 </body>
 </html>
-`, recipientName, activationLink, activationLink, activationLink)
+`, recipientName, activationLink, activationLink, activationLink, resendLink)
 
 	return z.sendRawMail(toEmail, from, subject+mime+body)
 }

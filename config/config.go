@@ -14,6 +14,7 @@ type Config struct {
 	CSRFSecret   string
 	CookieDomain string
 	CookieSecure bool
+	FrontendURL  string
 	ZohoHost     string
 	ZohoPort     string
 	ZohoUser     string
@@ -33,6 +34,7 @@ func LoadConfig() *Config {
 	csrfSecret := getEnv("CSRF_SECRET", "default_csrf_secret_change_me_2026")
 	cookieDomain := getEnv("COOKIE_DOMAIN", "localhost")
 	cookieSecure := getEnv("COOKIE_SECURE", "false") == "true"
+	frontendURL := getEnv("FRONTEND_URL", "http://localhost:5173/#")
 
 	zohoHost := getEnv("ZOHO_SMTP_HOST", "smtppro.zoho.in")
 	zohoPort := getEnv("ZOHO_SMTP_PORT", "587")
@@ -47,6 +49,7 @@ func LoadConfig() *Config {
 		CSRFSecret:   csrfSecret,
 		CookieDomain: cookieDomain,
 		CookieSecure: cookieSecure,
+		FrontendURL:  frontendURL,
 		ZohoHost:     zohoHost,
 		ZohoPort:     zohoPort,
 		ZohoUser:     zohoUser,

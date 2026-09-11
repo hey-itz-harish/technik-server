@@ -76,13 +76,17 @@ func CSRFMiddleware(cfg *config.Config) gin.HandlerFunc {
 		c.Header(CSRFHeaderName, cookieToken)
 
 		path := c.Request.URL.Path
-		// Exempt login, register, OTP sending & OTP verification, and account activation endpoints from CSRF header checks
+		// Exempt login, register, OTP sending & OTP verification, account
+		// activation/resend, and MFA setup endpoints from CSRF header checks —
+		// none of these have a session yet to carry a meaningful CSRF cookie.
 		if strings.HasSuffix(path, "/register") ||
 			strings.HasSuffix(path, "/login") ||
 			strings.HasSuffix(path, "/verify-otp") ||
 			strings.HasSuffix(path, "/send-otp") ||
 			strings.Contains(path, "/otp") ||
 			strings.Contains(path, "/activate") ||
+			strings.Contains(path, "/resend-activation") ||
+			strings.Contains(path, "/mfa/") ||
 			path == "/api/auth/csrf" {
 			c.Next()
 			return

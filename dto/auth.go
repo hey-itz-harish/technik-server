@@ -5,21 +5,21 @@ import "time"
 // School DTOs
 type SchoolRegisterRequest struct {
 	SchoolName             string `json:"schoolName" binding:"required,min=2"`
-	Board                  string `json:"board"`
-	State                  string `json:"state"`
-	District               string `json:"district"`
-	City                   string `json:"city"`
-	Address                string `json:"address"`
+	Board                  string `json:"board" binding:"required"`
+	State                  string `json:"state" binding:"required"`
+	District               string `json:"district" binding:"required"`
+	City                   string `json:"city" binding:"required"`
+	Address                string `json:"address" binding:"required"`
 	Pincode                string `json:"pincode"`
 	Email                  string `json:"email" binding:"required,email"`
-	Phone                  string `json:"phone"`
+	Phone                  string `json:"phone" binding:"required"`
 	SchoolMobile           string `json:"schoolMobile"`
 	Password               string `json:"password" binding:"required,min=6"`
-	PrincipalName          string `json:"principalName"`
-	CoordinatorName        string `json:"coordinatorName"`
-	CoordinatorDesignation string `json:"coordinatorDesignation"`
-	CoordinatorMobile      string `json:"coordinatorMobile"`
-	CoordinatorEmail       string `json:"coordinatorEmail"`
+	PrincipalName          string `json:"principalName" binding:"required"`
+	CoordinatorName        string `json:"coordinatorName" binding:"required"`
+	CoordinatorDesignation string `json:"coordinatorDesignation" binding:"required"`
+	CoordinatorMobile      string `json:"coordinatorMobile" binding:"required"`
+	CoordinatorEmail       string `json:"coordinatorEmail" binding:"required,email"`
 }
 
 type SchoolLoginRequest struct {
@@ -140,6 +140,38 @@ type StudentAuthResponse struct {
 type CSRFResponse struct {
 	Success   bool   `json:"success"`
 	CSRFToken string `json:"csrfToken"`
+}
+
+// LoginPendingResponse is returned by LoginSchool once the password check
+// passes: credentials are valid, but no session/cookie is issued yet — the
+// caller still has to complete code verification (email OTP or MS Authenticator).
+type LoginPendingResponse struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+	Email   string `json:"email"`
+}
+
+// MfaStatusResponse tells the Code Verification screen whether Microsoft
+// Authenticator has already been configured for this account.
+type MfaStatusResponse struct {
+	Success       bool   `json:"success"`
+	MsAuthEnabled bool   `json:"msAuthEnabled"`
+	Email         string `json:"email"`
+}
+
+// ResendActivationRequest is used by the frontend "Resend Activation Email" button.
+type ResendActivationRequest struct {
+	Email string `json:"email" binding:"required,email"`
+	Type  string `json:"type"` // "school" or "student"
+}
+
+// MfaVerifySetupRequest confirms the TOTP code shown by the authenticator app
+// during initial MFA setup (distinct from login-time code verification).
+type MfaVerifySetupRequest struct {
+	Email    string `json:"email" binding:"required,email"`
+	Code     string `json:"code" binding:"required"`
+	Type     string `json:"type"`
+	ActToken string `json:"actToken" binding:"required"`
 }
 
 type APIError struct {

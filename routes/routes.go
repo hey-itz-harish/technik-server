@@ -44,9 +44,16 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			auth.GET("/csrf", authHandler.GetCSRFToken)
 			auth.GET("/activate", authHandler.ActivateAccount)
 			auth.POST("/activate", authHandler.ActivateAccount)
+			auth.GET("/resend-activation", authHandler.ResendActivationByToken)
+			auth.POST("/resend-activation", authHandler.ResendActivationByEmail)
 			auth.POST("/send-otp", authHandler.SendOTP)
 			auth.POST("/verify-otp", authHandler.VerifyOTP)
 			auth.POST("/logout", authHandler.Logout)
+
+			// Microsoft Authenticator (TOTP) MFA setup & status routes
+			auth.GET("/mfa/setup", authHandler.GetMfaSetupQR)
+			auth.POST("/mfa/verify-setup", authHandler.VerifyMfaSetup)
+			auth.GET("/mfa-status", authHandler.GetMfaStatus)
 
 			protected := auth.Group("")
 			protected.Use(middleware.AuthMiddleware(cfg))

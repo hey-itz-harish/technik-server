@@ -138,9 +138,17 @@ func (h *AuthHandler) ActivateAccount(c *gin.Context) {
 				return
 			}
 
+			// Mint a short-lived token authorizing the immediate follow-up
+			// MFA setup step, so /api/auth/mfa/setup isn't reachable by
+			// email alone.
+			mfaSetupToken, _ := middleware.GeneratePurposeToken(school.Email, "school", "mfa-setup", h.cfg.JWTSecret, 30*time.Minute)
+
 			c.JSON(http.StatusOK, gin.H{
-				"success": true,
-				"message": "School account activated successfully! You can now login.",
+				"success":       true,
+				"message":       "School account activated successfully! You can now set up Microsoft Authenticator or continue to login.",
+				"email":         school.Email,
+				"schoolName":    school.SchoolName,
+				"mfaSetupToken": mfaSetupToken,
 			})
 			return
 		}
@@ -179,6 +187,124 @@ func (h *AuthHandler) ActivateAccount(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: "Invalid activation token"})
+}
+
+// buildResendLink signs a long-lived (7 day) purpose token for the given
+// school email and returns the backend URL that resends the activation
+// email when opened. Returns an empty string if signing fails.
+func (h *AuthHandler) buildResendLink(email string) string {
+	resendToken, err := middleware.GeneratePurposeToken(email, "school", "resend-activation", h.cfg.JWTSecret, 7*24*time.Hour)
+	if err != nil {
+		return ""
+	}
+	return fmt.Sprintf("http://localhost:%s/api/auth/resend-activation?rtoken=%s&type=school", h.cfg.Port, resendToken)
+}
+
+// resendActivationInternal regenerates a fresh activation token/expiry for
+// the given school email and re-sends the activation email (with a new
+// resend link of its own). Returns an error describing why the resend
+// couldn't be completed.
+func (h *AuthHandler) resendActivationInternal(ctx context.Context, email string) error {
+	school, err := database.Client.SchoolDetails.FindUnique(
+		db.SchoolDetails.Email.Equals(email),
+	).Exec(ctx)
+
+	if err != nil || school == nil {
+		return fmt.Errorf("no school account was found for this email")
+	}
+
+	if school.IsActivated {
+		return fmt.Errorf("this account is already activated — please proceed to login")
+	}
+
+	activationToken := uuid.New().String()
+	activationExpiry := time.Now().Add(24 * time.Hour)
+
+	_, err = database.Client.SchoolDetails.FindUnique(
+		db.SchoolDetails.ID.Equals(school.ID),
+	).Update(
+		db.SchoolDetails.ActivationToken.Set(activationToken),
+		db.SchoolDetails.ActivationExpiry.Set(activationExpiry),
+	).Exec(ctx)
+
+	if err != nil {
+		return fmt.Errorf("failed to regenerate the activation token")
+	}
+
+	activationLink := fmt.Sprintf("%s/activation-pending?token=%s&type=school", h.cfg.FrontendURL, activationToken)
+	resendLink := h.buildResendLink(email)
+
+	return h.zohoService.SendActivationEmail(email, school.SchoolName, activationLink, resendLink)
+}
+
+// resendResultHTML renders a small, self-contained confirmation page since
+// this link is opened directly from the email client, not via the frontend SPA.
+func resendResultHTML(success bool, message string) string {
+	title := "Activation Email Resent"
+	color := "#16a34a"
+	if !success {
+		title = "Couldn't Resend Activation Email"
+		color = "#dc2626"
+	}
+	return fmt.Sprintf(`<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><title>%s</title></head>
+<body style="font-family: Arial, sans-serif; background-color: #f8fafc; margin: 0; padding: 40px 20px;">
+  <div style="max-width: 480px; margin: 0 auto; background: #ffffff; padding: 32px; border-radius: 16px; border: 1px solid #e2e8f0; box-shadow: 0 4px 20px rgba(0,0,0,0.05); text-align: center;">
+    <h2 style="color: %s; margin: 0 0 12px 0;">%s</h2>
+    <p style="color: #475569; font-size: 14px; line-height: 1.6;">%s</p>
+  </div>
+</body>
+</html>`, title, color, title, message)
+}
+
+// ResendActivationByToken is hit directly from the "Resend Activation Link"
+// button embedded in the activation email. It validates the long-lived
+// resend token and reissues a fresh activation email.
+func (h *AuthHandler) ResendActivationByToken(c *gin.Context) {
+	rtoken := c.Query("rtoken")
+	if rtoken == "" {
+		c.Data(http.StatusBadRequest, "text/html; charset=utf-8", []byte(resendResultHTML(false, "This resend link is missing its token.")))
+		return
+	}
+
+	claims, err := middleware.ValidatePurposeToken(rtoken, "resend-activation", h.cfg.JWTSecret)
+	if err != nil {
+		c.Data(http.StatusBadRequest, "text/html; charset=utf-8", []byte(resendResultHTML(false, "This resend link is invalid or has expired. Please contact support.")))
+		return
+	}
+
+	if err := h.resendActivationInternal(context.Background(), claims.Email); err != nil {
+		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(resendResultHTML(false, err.Error())))
+		return
+	}
+
+	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(resendResultHTML(true, fmt.Sprintf("A fresh activation link has been sent to %s. Please check your inbox.", claims.Email))))
+}
+
+// ResendActivationByEmail powers the "Resend Activation Email" button on the
+// frontend's activation-pending waiting page.
+func (h *AuthHandler) ResendActivationByEmail(c *gin.Context) {
+	var req dto.ResendActivationRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: err.Error()})
+		return
+	}
+
+	if req.Type != "" && req.Type != "school" {
+		c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: "Resend is currently only supported for school accounts"})
+		return
+	}
+
+	if err := h.resendActivationInternal(context.Background(), req.Email); err != nil {
+		c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "A fresh activation link has been sent to your email.",
+	})
 }
 
 // SendOTP generates and emails a 6-digit OTP code using Zoho Mail Service
@@ -277,6 +403,7 @@ func (h *AuthHandler) VerifyOTP(c *gin.Context) {
 	ctx := context.Background()
 	now := time.Now()
 	clientIP := c.ClientIP()
+	mode := c.DefaultQuery("mode", "mail")
 
 	if req.Type == "school" {
 		school, err := database.Client.SchoolDetails.FindUnique(
@@ -293,17 +420,29 @@ func (h *AuthHandler) VerifyOTP(c *gin.Context) {
 			return
 		}
 
-		savedOtp, _ := school.Otp()
-		exp, ok := school.OtpExpiry()
+		if mode == "msauth" {
+			if !school.TwoFactorEnable {
+				c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: "Microsoft Authenticator is not set up for this account."})
+				return
+			}
+			secret, hasSecret := school.MsAuthSecret()
+			if !hasSecret || secret == "" || !validateTOTPCode(secret, req.OTP) {
+				c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: "Invalid authenticator code"})
+				return
+			}
+		} else {
+			savedOtp, _ := school.Otp()
+			exp, ok := school.OtpExpiry()
 
-		if savedOtp == "" || savedOtp != req.OTP {
-			c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: "Invalid OTP code"})
-			return
-		}
+			if savedOtp == "" || savedOtp != req.OTP {
+				c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: "Invalid OTP code"})
+				return
+			}
 
-		if !ok || exp.Before(now) {
-			c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: "OTP code has expired. Please request a new OTP."})
-			return
+			if !ok || exp.Before(now) {
+				c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: "OTP code has expired. Please request a new OTP."})
+				return
+			}
 		}
 
 		jwtToken, err := middleware.GenerateJWT(school.ID, school.Email, "school", h.cfg.JWTSecret)
@@ -356,9 +495,20 @@ func (h *AuthHandler) VerifyOTP(c *gin.Context) {
 		ip, _ := updatedSchool.IPAddress()
 		sExp := parseSessionExpiry(updatedSchool.SessionExpiry())
 
+		// Record the session start now — LoginSchool no longer issues a
+		// session by itself, so this is the actual point of login.
+		_, _ = database.Client.SessionLog.CreateOne(
+			db.SessionLog.UserEmail.Set(updatedSchool.Email),
+			db.SessionLog.Action.Set("LOGIN"),
+			db.SessionLog.IsActive.Set(true),
+			db.SessionLog.IPAddress.Set(clientIP),
+			db.SessionLog.UserAgent.Set(c.Request.UserAgent()),
+			db.SessionLog.SessionID.Set(sessionID),
+		).Exec(ctx)
+
 		c.JSON(http.StatusOK, dto.SchoolAuthResponse{
 			Success: true,
-			Message: "OTP verification successful",
+			Message: "Verification successful",
 			School: dto.SchoolResponse{
 				ID:                     updatedSchool.ID,
 				SchoolCode:             updatedSchool.SchoolCode,
@@ -569,8 +719,14 @@ func (h *AuthHandler) RegisterSchool(c *gin.Context) {
 		return
 	}
 
+	// Build the primary activation link (points at the frontend SPA) and a
+	// long-lived resend link (points at the backend directly, opened from
+	// the email itself, in case the 24h activation link has expired).
+	activationLink := fmt.Sprintf("%s/activation-pending?token=%s&type=school", h.cfg.FrontendURL, activationToken)
+	resendLink := h.buildResendLink(req.Email)
+
 	// Send activation email link via Zoho Mail Service
-	_ = h.zohoService.SendActivationEmail(req.Email, req.SchoolName, activationToken, "school")
+	_ = h.zohoService.SendActivationEmail(req.Email, req.SchoolName, activationLink, resendLink)
 
 	board, _ := newSchool.Board()
 	state, _ := newSchool.State()
@@ -614,7 +770,11 @@ func (h *AuthHandler) RegisterSchool(c *gin.Context) {
 	})
 }
 
-// LoginSchool authenticates school. Fails if isActivated is false.
+// LoginSchool authenticates school by email/password. Fails if isActivated
+// is false. On success it does NOT issue a session yet — instead it sends a
+// one-time code to the school's email. The caller must then complete
+// /api/auth/verify-otp (mode=mail or mode=msauth) before a session cookie
+// is set.
 func (h *AuthHandler) LoginSchool(c *gin.Context) {
 	var req dto.SchoolLoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -646,118 +806,30 @@ func (h *AuthHandler) LoginSchool(c *gin.Context) {
 		return
 	}
 
-	clientIP := c.ClientIP()
-	jwtToken, err := middleware.GenerateJWT(school.ID, school.Email, "school", h.cfg.JWTSecret)
+	otpCode := GenerateNumericOTP()
+	otpExpiry := time.Now().Add(10 * time.Minute)
+
+	_, err = database.Client.SchoolDetails.FindUnique(
+		db.SchoolDetails.ID.Equals(school.ID),
+	).Update(
+		db.SchoolDetails.Otp.Set(otpCode),
+		db.SchoolDetails.OtpExpiry.Set(otpExpiry),
+	).Exec(ctx)
+
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, dto.APIError{Success: false, Error: "Failed to generate token"})
+		c.JSON(http.StatusInternalServerError, dto.APIError{Success: false, Error: "Failed to prepare verification code"})
 		return
 	}
 
-	var csrfToken, sessionID string
-	var sessionExpiry time.Time
-	var updatedSchool *db.SchoolDetailsModel
-
-	if req.RememberMe {
-		sessionID = uuid.New().String()
-		csrfToken = middleware.GenerateCSRFToken(h.cfg.CSRFSecret)
-		sessionExpiry = time.Now().Add(24 * time.Hour) // 1 Day Expiry
-
-		updatedSchool, err = database.Client.SchoolDetails.FindUnique(
-			db.SchoolDetails.ID.Equals(school.ID),
-		).Update(
-			db.SchoolDetails.RememberMe.Set(true),
-			db.SchoolDetails.IPAddress.Set(clientIP),
-			db.SchoolDetails.SessionID.Set(sessionID),
-			db.SchoolDetails.CsrfID.Set(csrfToken),
-			db.SchoolDetails.SessionExpiry.Set(sessionExpiry),
-		).Exec(ctx)
-
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, dto.APIError{Success: false, Error: "Failed to establish remember me session"})
-			return
-		}
-
-		c.SetSameSite(http.SameSiteLaxMode)
-		c.SetCookie(middleware.JWTCookieName, jwtToken, 86400, "/", h.cfg.CookieDomain, h.cfg.CookieSecure, true)
-		c.SetCookie(middleware.CSRFCookieName, csrfToken, 86400, "/", h.cfg.CookieDomain, h.cfg.CookieSecure, false)
-	} else {
-		csrfToken = middleware.GenerateCSRFToken(h.cfg.CSRFSecret)
-		updatedSchool, _ = database.Client.SchoolDetails.FindUnique(
-			db.SchoolDetails.ID.Equals(school.ID),
-		).Update(
-			db.SchoolDetails.RememberMe.Set(false),
-			db.SchoolDetails.IPAddress.Set(clientIP),
-		).Exec(ctx)
-
-		c.SetSameSite(http.SameSiteLaxMode)
-		c.SetCookie(middleware.JWTCookieName, jwtToken, 0, "/", h.cfg.CookieDomain, h.cfg.CookieSecure, true)
-		c.SetCookie(middleware.CSRFCookieName, csrfToken, 0, "/", h.cfg.CookieDomain, h.cfg.CookieSecure, false)
+	if err := h.zohoService.SendOTPEmail(school.Email, school.SchoolName, otpCode); err != nil {
+		c.JSON(http.StatusInternalServerError, dto.APIError{Success: false, Error: "Failed to send verification email: " + err.Error()})
+		return
 	}
 
-	if updatedSchool != nil {
-		school = updatedSchool
-	}
-
-	board, _ := school.Board()
-	state, _ := school.State()
-	district, _ := school.District()
-	city, _ := school.City()
-	address, _ := school.Address()
-	pincode, _ := school.Pincode()
-	phone, _ := school.Phone()
-	principal, _ := school.PrincipalName()
-	coordName, _ := school.CoordinatorName()
-	coordDesig, _ := school.CoordinatorDesignation()
-	coordMob, _ := school.CoordinatorMobile()
-	coordEmail, _ := school.CoordinatorEmail()
-	cID, _ := school.CsrfID()
-	sID, _ := school.SessionID()
-	ip, _ := school.IPAddress()
-	sExp := parseSessionExpiry(school.SessionExpiry())
-
-	// Log Session creation
-	_, _ = database.Client.SessionLog.CreateOne(
-		db.SessionLog.UserEmail.Set(school.Email),
-		db.SessionLog.Action.Set("LOGIN"),
-		db.SessionLog.IsActive.Set(true),
-		db.SessionLog.IPAddress.Set(clientIP),
-		db.SessionLog.UserAgent.Set(c.Request.UserAgent()),
-		db.SessionLog.SessionID.Set(sessionID),
-	).Exec(ctx)
-
-	c.JSON(http.StatusOK, dto.SchoolAuthResponse{
+	c.JSON(http.StatusOK, dto.LoginPendingResponse{
 		Success: true,
-		Message: "School login successful",
-		School: dto.SchoolResponse{
-			ID:                     school.ID,
-			SchoolCode:             school.SchoolCode,
-			SchoolName:             school.SchoolName,
-			Email:                  school.Email,
-			Board:                  board,
-			State:                  state,
-			District:               district,
-			City:                   city,
-			Address:                address,
-			Pincode:                pincode,
-			Phone:                  phone,
-			PrincipalName:          principal,
-			CoordinatorName:        coordName,
-			CoordinatorDesignation: coordDesig,
-			CoordinatorMobile:      coordMob,
-			CoordinatorEmail:       coordEmail,
-			TwoFactorEnable:        school.TwoFactorEnable,
-			IsActivated:            school.IsActivated,
-			IsVerified:             school.IsVerified,
-			CSRFID:                 cID,
-			SessionID:              sID,
-			IPAddress:              ip,
-			RememberMe:             school.RememberMe,
-			SessionExpiry:          sExp,
-			CreatedAt:              school.CreatedAt,
-			UpdatedAt:              school.UpdatedAt,
-		},
-		Token:     jwtToken,
-		CSRFToken: csrfToken,
+		Message: "Login credentials verified. A verification code has been sent to your email — please complete verification to continue.",
+		Email:   school.Email,
 	})
 }
 
