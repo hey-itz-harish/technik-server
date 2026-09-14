@@ -287,7 +287,7 @@ func (h *AuthHandler) ResendActivationByToken(c *gin.Context) {
 func (h *AuthHandler) ResendActivationByEmail(c *gin.Context) {
 	var req dto.ResendActivationRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: err.Error()})
+		c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: FormatValidationError(err)})
 		return
 	}
 
@@ -311,7 +311,7 @@ func (h *AuthHandler) ResendActivationByEmail(c *gin.Context) {
 func (h *AuthHandler) SendOTP(c *gin.Context) {
 	var req dto.SendOTPRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: err.Error()})
+		c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: FormatValidationError(err)})
 		return
 	}
 
@@ -396,7 +396,7 @@ func (h *AuthHandler) SendOTP(c *gin.Context) {
 func (h *AuthHandler) VerifyOTP(c *gin.Context) {
 	var req dto.VerifyOTPRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: err.Error()})
+		c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: FormatValidationError(err)})
 		return
 	}
 
@@ -647,7 +647,7 @@ func (h *AuthHandler) VerifyOTP(c *gin.Context) {
 func (h *AuthHandler) RegisterSchool(c *gin.Context) {
 	var req dto.SchoolRegisterRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: err.Error()})
+		c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: FormatValidationError(err)})
 		return
 	}
 
@@ -728,45 +728,12 @@ func (h *AuthHandler) RegisterSchool(c *gin.Context) {
 	// Send activation email link via Zoho Mail Service
 	_ = h.zohoService.SendActivationEmail(req.Email, req.SchoolName, activationLink, resendLink)
 
-	board, _ := newSchool.Board()
-	state, _ := newSchool.State()
-	district, _ := newSchool.District()
-	city, _ := newSchool.City()
-	address, _ := newSchool.Address()
-	pincode, _ := newSchool.Pincode()
-	phone, _ := newSchool.Phone()
-	principal, _ := newSchool.PrincipalName()
-	coordName, _ := newSchool.CoordinatorName()
-	coordDesig, _ := newSchool.CoordinatorDesignation()
-	coordMob, _ := newSchool.CoordinatorMobile()
-	coordEmail, _ := newSchool.CoordinatorEmail()
-
-	c.JSON(http.StatusCreated, dto.SchoolAuthResponse{
+	// The account isn't activated yet, so there's no session or profile to
+	// hand back — just the email, for the Activation Pending page.
+	c.JSON(http.StatusCreated, dto.RegisterPendingResponse{
 		Success: true,
 		Message: "School registered successfully. An activation link has been sent to your email. Please click the link to activate your account before logging in.",
-		School: dto.SchoolResponse{
-			ID:                     newSchool.ID,
-			SchoolCode:             newSchool.SchoolCode,
-			SchoolName:             newSchool.SchoolName,
-			Email:                  newSchool.Email,
-			Board:                  board,
-			State:                  state,
-			District:               district,
-			City:                   city,
-			Address:                address,
-			Pincode:                pincode,
-			Phone:                  phone,
-			PrincipalName:          principal,
-			CoordinatorName:        coordName,
-			CoordinatorDesignation: coordDesig,
-			CoordinatorMobile:      coordMob,
-			CoordinatorEmail:       coordEmail,
-			TwoFactorEnable:        newSchool.TwoFactorEnable,
-			IsActivated:            newSchool.IsActivated,
-			IsVerified:             newSchool.IsVerified,
-			CreatedAt:              newSchool.CreatedAt,
-			UpdatedAt:              newSchool.UpdatedAt,
-		},
+		Email:   newSchool.Email,
 	})
 }
 
@@ -778,7 +745,7 @@ func (h *AuthHandler) RegisterSchool(c *gin.Context) {
 func (h *AuthHandler) LoginSchool(c *gin.Context) {
 	var req dto.SchoolLoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: err.Error()})
+		c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: FormatValidationError(err)})
 		return
 	}
 

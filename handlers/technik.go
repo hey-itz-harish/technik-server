@@ -96,7 +96,7 @@ func (h *TechnikHandler) NominateTechnikPride(c *gin.Context) {
 	// Single nomination fallback
 	var singleReq dto.TechnikPrideNominationRequest
 	if err := c.ShouldBindJSON(&singleReq); err != nil {
-		c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: err.Error()})
+		c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: FormatValidationError(err)})
 		return
 	}
 
@@ -224,7 +224,7 @@ func (h *TechnikHandler) GetTechnikPrideNominations(c *gin.Context) {
 func (h *TechnikHandler) RegisterOlympiad(c *gin.Context) {
 	var req dto.OlympiadRegistrationRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: err.Error()})
+		c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: FormatValidationError(err)})
 		return
 	}
 

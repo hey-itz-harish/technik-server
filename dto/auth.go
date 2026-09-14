@@ -142,6 +142,17 @@ type CSRFResponse struct {
 	CSRFToken string `json:"csrfToken"`
 }
 
+// RegisterPendingResponse is returned by RegisterSchool: registration
+// succeeded and an activation email is on its way, but the account isn't
+// activated yet, so there's no session/school profile to hand back — just
+// the email, which the Activation Pending page needs to show "check your
+// inbox" and to power its resend-email button.
+type RegisterPendingResponse struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+	Email   string `json:"email"`
+}
+
 // LoginPendingResponse is returned by LoginSchool once the password check
 // passes: credentials are valid, but no session/cookie is issued yet — the
 // caller still has to complete code verification (email OTP or MS Authenticator).

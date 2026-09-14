@@ -87,7 +87,7 @@ func (h *AuthHandler) GetMfaSetupQR(c *gin.Context) {
 func (h *AuthHandler) VerifyMfaSetup(c *gin.Context) {
 	var req dto.MfaVerifySetupRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: err.Error()})
+		c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: FormatValidationError(err)})
 		return
 	}
 
