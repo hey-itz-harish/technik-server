@@ -84,10 +84,16 @@ type StudentResponse struct {
 	Email           string          `json:"email,omitempty"`
 	Phone           string          `json:"phone,omitempty"`
 	Grade           string          `json:"grade"`
+	ClassCategory   string          `json:"classCategory,omitempty"`
+	Category        string          `json:"category,omitempty"`
+	Gender          string          `json:"gender,omitempty"`
+	Status          string          `json:"status,omitempty"`
+	AcademicYear    int             `json:"academicYear,omitempty"`
 	Section         string          `json:"section,omitempty"`
 	RollNo          string          `json:"rollNo,omitempty"`
 	ParentName      string          `json:"parentName,omitempty"`
 	ParentPhone     string          `json:"parentPhone,omitempty"`
+	SchoolID        string          `json:"schoolId,omitempty"`
 	School          *SchoolResponse `json:"school,omitempty"`
 	TwoFactorEnable bool            `json:"twoFactorEnable"`
 	IsActivated     bool            `json:"isActivated"`

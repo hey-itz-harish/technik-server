@@ -76,9 +76,7 @@ func CSRFMiddleware(cfg *config.Config) gin.HandlerFunc {
 		c.Header(CSRFHeaderName, cookieToken)
 
 		path := c.Request.URL.Path
-		// Exempt login, register, OTP sending & OTP verification, account
-		// activation/resend, and MFA setup endpoints from CSRF header checks —
-		// none of these have a session yet to carry a meaningful CSRF cookie.
+		// Exempt ONLY pre-login/pre-session onboarding endpoints from CSRF header checks
 		if strings.HasSuffix(path, "/register") ||
 			strings.HasSuffix(path, "/login") ||
 			strings.HasSuffix(path, "/verify-otp") ||
@@ -87,12 +85,13 @@ func CSRFMiddleware(cfg *config.Config) gin.HandlerFunc {
 			strings.Contains(path, "/activate") ||
 			strings.Contains(path, "/resend-activation") ||
 			strings.Contains(path, "/mfa/") ||
+			strings.Contains(path, "/mfa-status") ||
 			path == "/api/auth/csrf" {
 			c.Next()
 			return
 		}
 
-		// State-altering HTTP methods on protected routes require token verification
+		// State-altering HTTP methods on all portal routes strictly require valid CSRF token
 		method := c.Request.Method
 		if method == "POST" || method == "PUT" || method == "DELETE" || method == "PATCH" {
 			headerToken := c.GetHeader(CSRFHeaderName)
@@ -100,7 +99,7 @@ func CSRFMiddleware(cfg *config.Config) gin.HandlerFunc {
 				headerToken = c.PostForm("csrf_token")
 			}
 
-			if headerToken == "" || headerToken != cookieToken || !ValidateCSRFToken(headerToken, cfg.CSRFSecret) {
+			if headerToken == "" || !ValidateCSRFToken(headerToken, cfg.CSRFSecret) {
 				c.JSON(http.StatusForbidden, dto.APIError{
 					Success: false,
 					Error:   "CSRF token validation failed. Missing or invalid X-CSRF-Token header.",

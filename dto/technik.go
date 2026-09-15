@@ -34,6 +34,8 @@ type TechnikPrideNominationResponse struct {
 	AchievementTitle    string    `json:"achievementTitle"`
 	BriefDescription    string    `json:"briefDescription"`
 	SupportingDocument  string    `json:"supportingDocument,omitempty"`
+	NominationStatus    string    `json:"nominationStatus"`
+	AdminStatus         string    `json:"adminStatus"`
 	CreatedAt           time.Time `json:"createdAt"`
 	UpdatedAt           time.Time `json:"updatedAt"`
 }
@@ -43,6 +45,14 @@ type TechnikPrideAuthResponse struct {
 	Message     string                           `json:"message"`
 	Total       int                              `json:"total,omitempty"`
 	Nominations []TechnikPrideNominationResponse `json:"nominations,omitempty"`
+}
+
+// Student Roster DTOs
+type SchoolStudentsResponse struct {
+	Success  bool              `json:"success"`
+	Message  string            `json:"message"`
+	Total    int               `json:"total"`
+	Students []StudentResponse `json:"students"`
 }
 
 // Olympiad Registration DTOs

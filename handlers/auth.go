@@ -145,6 +145,7 @@ func (h *AuthHandler) ActivateAccount(c *gin.Context) {
 
 			c.JSON(http.StatusOK, gin.H{
 				"success":       true,
+				"isActivated":   true,
 				"message":       "School account activated successfully! You can now set up Microsoft Authenticator or continue to login.",
 				"email":         school.Email,
 				"schoolName":    school.SchoolName,
@@ -179,14 +180,82 @@ func (h *AuthHandler) ActivateAccount(c *gin.Context) {
 			}
 
 			c.JSON(http.StatusOK, gin.H{
-				"success": true,
-				"message": "Student account activated successfully! You can now login.",
+				"success":     true,
+				"isActivated": true,
+				"message":     "Student account activated successfully! You can now login.",
 			})
 			return
 		}
 	}
 
 	c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: "Invalid activation token"})
+}
+
+// GetActivationStatus returns the current activation status (isActivated: true/false) for a school or student.
+func (h *AuthHandler) GetActivationStatus(c *gin.Context) {
+	email := c.Query("email")
+	token := c.Query("token")
+	entityType := c.Query("type")
+
+	if email == "" && token == "" {
+		c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: "email or token is required"})
+		return
+	}
+
+	ctx := context.Background()
+
+	if entityType == "school" || entityType == "" {
+		var school *db.SchoolDetailsModel
+		var err error
+
+		if email != "" {
+			school, err = database.Client.SchoolDetails.FindUnique(
+				db.SchoolDetails.Email.Equals(email),
+			).Exec(ctx)
+		} else if token != "" {
+			school, err = database.Client.SchoolDetails.FindFirst(
+				db.SchoolDetails.ActivationToken.Equals(token),
+			).Exec(ctx)
+		}
+
+		if err == nil && school != nil {
+			c.JSON(http.StatusOK, gin.H{
+				"success":         true,
+				"isActivated":     school.IsActivated,
+				"email":           school.Email,
+				"schoolName":      school.SchoolName,
+				"twoFactorEnable": school.TwoFactorEnable,
+			})
+			return
+		}
+	}
+
+	if entityType == "student" || entityType == "" {
+		var student *db.StudentDetailsModel
+		var err error
+
+		if email != "" {
+			student, err = database.Client.StudentDetails.FindUnique(
+				db.StudentDetails.Email.Equals(email),
+			).Exec(ctx)
+		} else if token != "" {
+			student, err = database.Client.StudentDetails.FindFirst(
+				db.StudentDetails.ActivationToken.Equals(token),
+			).Exec(ctx)
+		}
+
+		if err == nil && student != nil {
+			c.JSON(http.StatusOK, gin.H{
+				"success":         true,
+				"isActivated":     student.IsActivated,
+				"email":           student.Email,
+				"twoFactorEnable": student.TwoFactorEnable,
+			})
+			return
+		}
+	}
+
+	c.JSON(http.StatusNotFound, dto.APIError{Success: false, Error: "Account not found"})
 }
 
 // buildResendLink signs a long-lived (7 day) purpose token for the given

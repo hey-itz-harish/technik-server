@@ -36,7 +36,7 @@ func LoadConfig() *Config {
 	cookieSecure := getEnv("COOKIE_SECURE", "false") == "true"
 	frontendURL := getEnv("FRONTEND_URL", "http://localhost:5173/#")
 
-	zohoHost := getEnv("ZOHO_SMTP_HOST", "smtppro.zoho.in")
+	zohoHost := getEnv("ZOHO_SMTP_HOST", "smtp.zoho.in")
 	zohoPort := getEnv("ZOHO_SMTP_PORT", "587")
 	zohoUser := getEnv("ZOHO_SMTP_USER", "")
 	zohoPass := getEnv("ZOHO_SMTP_PASS", "")

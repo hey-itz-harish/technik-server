@@ -34,16 +34,38 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	// 3. CSRF Protection Middleware
 	r.Use(middleware.CSRFMiddleware(cfg))
 
+	// Static file serving for uploaded certificates and documents
+	r.Static("/uploads", "./uploads")
+
 	authHandler := handlers.NewAuthHandler(cfg)
+	technikHandler := handlers.NewTechnikHandler(cfg)
+	adminHandler := handlers.NewAdminHandler(cfg)
 
 	api := r.Group("/api")
 	{
+		// Admin / Technik Portal routes
+		admin := api.Group("/admin")
+		{
+			admin.POST("/login", adminHandler.LoginAdmin)
+			admin.POST("/verify-otp", adminHandler.VerifyAdminOTP)
+
+			// Admin Authenticated Dashboard Endpoints
+			admin.GET("/stats", adminHandler.GetAdminStats)
+			admin.GET("/pride-nominations", adminHandler.GetAdminPrideNominations)
+			admin.PATCH("/pride-nominations/:id/status", adminHandler.UpdatePrideNominationStatus)
+			admin.POST("/pride-nominations/:id/status", adminHandler.UpdatePrideNominationStatus)
+			admin.GET("/olympiad-registrations", adminHandler.GetAdminOlympiadRegistrations)
+			admin.GET("/users", adminHandler.GetAdminUsers)
+			admin.POST("/users", adminHandler.CreateAdminUser)
+		}
+
 		// Global Auth & OTP routes
 		auth := api.Group("/auth")
 		{
 			auth.GET("/csrf", authHandler.GetCSRFToken)
 			auth.GET("/activate", authHandler.ActivateAccount)
 			auth.POST("/activate", authHandler.ActivateAccount)
+			auth.GET("/activation-status", authHandler.GetActivationStatus)
 			auth.GET("/resend-activation", authHandler.ResendActivationByToken)
 			auth.POST("/resend-activation", authHandler.ResendActivationByEmail)
 			auth.POST("/send-otp", authHandler.SendOTP)
@@ -62,27 +84,26 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			}
 		}
 
-		// School Auth routes
+		// School Auth routes (public)
 		school := api.Group("/school")
 		{
 			school.POST("/register", authHandler.RegisterSchool)
 			school.POST("/login", authHandler.LoginSchool)
 		}
 
-		technikHandler := handlers.NewTechnikHandler(cfg)
-
-		// Technik Pride Award Nomination routes
-		pride := api.Group("/technik-pride")
+		// Authenticated School Portal & Technik Competition routes
+		portal := api.Group("")
+		portal.Use(middleware.AuthMiddleware(cfg))
 		{
-			pride.POST("/nominate", technikHandler.NominateTechnikPride)
-			pride.GET("/nominations", technikHandler.GetTechnikPrideNominations)
-		}
+			portal.GET("/school/students", technikHandler.GetSchoolStudents)
+			portal.POST("/school/upload-document", technikHandler.UploadDocument)
 
-		// Olympiad Registration routes
-		olympiad := api.Group("/olympiad")
-		{
-			olympiad.POST("/register", technikHandler.RegisterOlympiad)
-			olympiad.GET("/registrations", technikHandler.GetOlympiadRegistrations)
+			portal.POST("/technik-pride/nominate", technikHandler.NominateTechnikPride)
+			portal.GET("/technik-pride/nominations", technikHandler.GetTechnikPrideNominations)
+			portal.POST("/technik-pride/upload", technikHandler.UploadDocument)
+
+			portal.POST("/olympiad/register", technikHandler.RegisterOlympiad)
+			portal.GET("/olympiad/registrations", technikHandler.GetOlympiadRegistrations)
 		}
 	}
 

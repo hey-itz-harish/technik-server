@@ -70,6 +70,13 @@ model StudentDetails {
   schoolId        String?
   school          SchoolDetails? @relation(fields: [schoolId], references: [id])
 
+  // Enrolled Student Roster Fields
+  gender          String?
+  category        String?        // e.g. "Technik Pride Award" or "Olympiad - Robotics Olympiad"
+  classCategory   String?        // e.g. "Jr Level", "Sr Level", "Grade 3 to 5 (Jr Level)", "Grade 6 to 8 (Senior Level)"
+  status          String?        @default("Registered & Verified") // "Registered & Verified", "Nomination Received", "Pride Award Winner"
+  academicYear    Int?           @default(2026)
+
   // Activation, Verification & Security Fields
   isActivated     Boolean        @default(false)
   isVerified      Boolean        @default(false)
@@ -165,6 +172,8 @@ model TechnikPrideNomination {
   achievementTitle    String         // Achievement / Talent Title
   briefDescription    String         // Max 300 characters
   supportingDocument  String?        // Upload certificate/photo URL or path
+  nominationStatus    String?        @default("Submitted & Under Review")
+  adminStatus         String?        @default("Forwarded to Technik Super Admin")
 
   createdAt           DateTime       @default(now())
   updatedAt           DateTime       @updatedAt

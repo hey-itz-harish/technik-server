@@ -3,7 +3,6 @@ package mail
 import (
 	"crypto/tls"
 	"fmt"
-	"net"
 	"net/smtp"
 	"technik-server/config"
 	"technik-server/logger"
@@ -129,50 +128,23 @@ func (z *ZohoMailService) SendOTPEmail(toEmail, recipientName, otpCode string) e
 
 func (z *ZohoMailService) sendRawMail(toEmail, from, rawBody string) error {
 	msg := []byte(rawBody)
-	addr := fmt.Sprintf("%s:%s", z.cfg.ZohoHost, z.cfg.ZohoPort)
-	auth := smtp.PlainAuth("", z.cfg.ZohoUser, z.cfg.ZohoPass, z.cfg.ZohoHost)
+	host := z.cfg.ZohoHost
+	port := z.cfg.ZohoPort
+	user := z.cfg.ZohoUser
+	pass := z.cfg.ZohoPass
 
 	var err error
-	if z.cfg.ZohoPort == "465" {
-		tlsconfig := &tls.Config{
-			InsecureSkipVerify: false,
-			ServerName:         z.cfg.ZohoHost,
-		}
-		conn, dialErr := tls.Dial("tcp", addr, tlsconfig)
-		if dialErr != nil {
-			logger.Error("Failed to connect to Zoho SSL SMTP: %v", dialErr)
-			return dialErr
-		}
-		client, clientErr := smtp.NewClient(conn, z.cfg.ZohoHost)
-		if clientErr != nil {
-			logger.Error("Failed to create Zoho SMTP client: %v", clientErr)
-			return clientErr
-		}
-		defer client.Close()
-
-		if err = client.Auth(auth); err != nil {
-			return err
-		}
-		if err = client.Mail(from); err != nil {
-			return err
-		}
-		if err = client.Rcpt(toEmail); err != nil {
-			return err
-		}
-		w, err := client.Data()
+	if port == "465" {
+		err = z.sendSSLMail(host, port, user, pass, from, toEmail, msg)
 		if err != nil {
-			return err
+			logger.Error("Zoho SSL SMTP (port 465) failed: %v. Retrying via STARTTLS (port 587)...", err)
+			err = z.sendSTARTTLSMail(host, "587", user, pass, from, toEmail, msg)
+			if err == nil {
+				port = "587 (fallback)"
+			}
 		}
-		_, err = w.Write(msg)
-		if err != nil {
-			return err
-		}
-		err = w.Close()
-		client.Quit()
 	} else {
-		host, _, _ := net.SplitHostPort(addr)
-		auth := smtp.PlainAuth("", z.cfg.ZohoUser, z.cfg.ZohoPass, host)
-		err = smtp.SendMail(addr, auth, from, []string{toEmail}, msg)
+		err = z.sendSTARTTLSMail(host, port, user, pass, from, toEmail, msg)
 	}
 
 	if err != nil {
@@ -180,6 +152,52 @@ func (z *ZohoMailService) sendRawMail(toEmail, from, rawBody string) error {
 		return err
 	}
 
-	logger.Info("Successfully sent email to %s via Zoho Mail SMTP", toEmail)
+	logger.Info("Successfully sent email to %s via Zoho Mail SMTP (Port %s)", toEmail, port)
 	return nil
+}
+
+func (z *ZohoMailService) sendSSLMail(host, port, user, pass, from, toEmail string, msg []byte) error {
+	addr := fmt.Sprintf("%s:%s", host, port)
+	auth := smtp.PlainAuth("", user, pass, host)
+	tlsconfig := &tls.Config{
+		InsecureSkipVerify: false,
+		ServerName:         host,
+	}
+	conn, dialErr := tls.Dial("tcp", addr, tlsconfig)
+	if dialErr != nil {
+		return dialErr
+	}
+	client, clientErr := smtp.NewClient(conn, host)
+	if clientErr != nil {
+		conn.Close()
+		return clientErr
+	}
+	defer client.Close()
+
+	if err := client.Auth(auth); err != nil {
+		return err
+	}
+	if err := client.Mail(from); err != nil {
+		return err
+	}
+	if err := client.Rcpt(toEmail); err != nil {
+		return err
+	}
+	w, err := client.Data()
+	if err != nil {
+		return err
+	}
+	if _, err = w.Write(msg); err != nil {
+		return err
+	}
+	if err = w.Close(); err != nil {
+		return err
+	}
+	return client.Quit()
+}
+
+func (z *ZohoMailService) sendSTARTTLSMail(host, port, user, pass, from, toEmail string, msg []byte) error {
+	addr := fmt.Sprintf("%s:%s", host, port)
+	auth := smtp.PlainAuth("", user, pass, host)
+	return smtp.SendMail(addr, auth, from, []string{toEmail}, msg)
 }
