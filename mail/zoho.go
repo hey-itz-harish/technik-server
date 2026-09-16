@@ -12,35 +12,20 @@ import (
 )
 
 type ZohoMailService struct {
-	cfg *config.Config
+	cfg           *config.Config
+	resendService *ResendMailService
 }
 
 func NewZohoMailService(cfg *config.Config) *ZohoMailService {
-	return &ZohoMailService{cfg: cfg}
+	return &ZohoMailService{
+		cfg:           cfg,
+		resendService: NewResendMailService(cfg),
+	}
 }
 
-// SendActivationEmail sends an account activation link via Zoho Mail SMTP.
-// activationLink is the primary CTA (points at the frontend SPA, valid ~24h).
-// resendLink is a secondary link (points at the backend directly, valid ~7 days)
-// that lets the recipient get a fresh activation link even after the primary
-// one has expired.
+// SendActivationEmail sends an account activation link via Resend API (HTTPS) or Zoho SMTP.
 func (z *ZohoMailService) SendActivationEmail(toEmail, recipientName, activationLink, resendLink string) error {
-	if z.cfg.ZohoUser == "" || z.cfg.ZohoPass == "" {
-		logger.Error("Zoho SMTP credentials not configured in .env (ZOHO_SMTP_USER & ZOHO_SMTP_PASS required)")
-		logger.Info("--------------------------------------------------")
-		logger.Info("[DEV MOCK ACTIVATION LINK] To: %s (%s) | Link: %s | Resend Link: %s", toEmail, recipientName, activationLink, resendLink)
-		logger.Info("--------------------------------------------------")
-		return nil
-	}
-
-	from := z.cfg.ZohoFrom
-	if from == "" {
-		from = z.cfg.ZohoUser
-	}
-
-	subject := "Subject: Technik Olympiad - Activate Your Account\n"
-	mime := "MIME-version: 1.0;\nContent-Type: text/html; charset=\"UTF-8\";\nFrom: Technik Olympiad <" + from + ">\nTo: " + toEmail + "\n\n"
-	body := fmt.Sprintf(`
+	htmlBody := fmt.Sprintf(`
 <!DOCTYPE html>
 <html>
 <body style="font-family: Arial, sans-serif; background-color: #f8fafc; margin: 0; padding: 20px;">
@@ -78,15 +63,16 @@ func (z *ZohoMailService) SendActivationEmail(toEmail, recipientName, activation
 </html>
 `, recipientName, activationLink, activationLink, activationLink, resendLink)
 
-	return z.sendRawMail(toEmail, from, subject+mime+body)
-}
+	// 1. Primary: Use Resend HTTPS API if configured (Zero blocking on Railway)
+	if z.cfg.ResendApiKey != "" {
+		return z.resendService.SendEmail(toEmail, "Technik Olympiad - Activate Your Account", htmlBody)
+	}
 
-// SendOTPEmail sends a styled HTML OTP email via Zoho Mail SMTP
-func (z *ZohoMailService) SendOTPEmail(toEmail, recipientName, otpCode string) error {
+	// 2. Secondary: Fallback to Zoho SMTP if configured
 	if z.cfg.ZohoUser == "" || z.cfg.ZohoPass == "" {
-		logger.Error("Zoho SMTP credentials not configured in .env (ZOHO_SMTP_USER & ZOHO_SMTP_PASS required)")
+		logger.Error("Neither RESEND_API_KEY nor ZOHO_SMTP credentials are configured in .env")
 		logger.Info("--------------------------------------------------")
-		logger.Info("[DEV MOCK OTP EMAIL] To: %s (%s) | OTP: %s", toEmail, recipientName, otpCode)
+		logger.Info("[DEV MOCK ACTIVATION LINK] To: %s (%s) | Link: %s | Resend Link: %s", toEmail, recipientName, activationLink, resendLink)
 		logger.Info("--------------------------------------------------")
 		return nil
 	}
@@ -96,9 +82,15 @@ func (z *ZohoMailService) SendOTPEmail(toEmail, recipientName, otpCode string) e
 		from = z.cfg.ZohoUser
 	}
 
-	subject := "Subject: Technik Olympiad - Your OTP Verification Code\n"
+	subject := "Subject: Technik Olympiad - Activate Your Account\n"
 	mime := "MIME-version: 1.0;\nContent-Type: text/html; charset=\"UTF-8\";\nFrom: Technik Olympiad <" + from + ">\nTo: " + toEmail + "\n\n"
-	body := fmt.Sprintf(`
+
+	return z.sendRawMail(toEmail, from, subject+mime+htmlBody)
+}
+
+// SendOTPEmail sends a styled HTML OTP email via Resend API (HTTPS) or Zoho Mail SMTP
+func (z *ZohoMailService) SendOTPEmail(toEmail, recipientName, otpCode string) error {
+	htmlBody := fmt.Sprintf(`
 <!DOCTYPE html>
 <html>
 <body style="font-family: Arial, sans-serif; background-color: #f8fafc; margin: 0; padding: 20px;">
@@ -126,7 +118,29 @@ func (z *ZohoMailService) SendOTPEmail(toEmail, recipientName, otpCode string) e
 </html>
 `, recipientName, otpCode)
 
-	return z.sendRawMail(toEmail, from, subject+mime+body)
+	// 1. Primary: Use Resend HTTPS API if configured (Zero blocking on Railway)
+	if z.cfg.ResendApiKey != "" {
+		return z.resendService.SendEmail(toEmail, "Technik Olympiad - Your OTP Verification Code", htmlBody)
+	}
+
+	// 2. Secondary: Fallback to Zoho SMTP if configured
+	if z.cfg.ZohoUser == "" || z.cfg.ZohoPass == "" {
+		logger.Error("Neither RESEND_API_KEY nor ZOHO_SMTP credentials are configured in .env")
+		logger.Info("--------------------------------------------------")
+		logger.Info("[DEV MOCK OTP EMAIL] To: %s (%s) | OTP: %s", toEmail, recipientName, otpCode)
+		logger.Info("--------------------------------------------------")
+		return nil
+	}
+
+	from := z.cfg.ZohoFrom
+	if from == "" {
+		from = z.cfg.ZohoUser
+	}
+
+	subject := "Subject: Technik Olympiad - Your OTP Verification Code\n"
+	mime := "MIME-version: 1.0;\nContent-Type: text/html; charset=\"UTF-8\";\nFrom: Technik Olympiad <" + from + ">\nTo: " + toEmail + "\n\n"
+
+	return z.sendRawMail(toEmail, from, subject+mime+htmlBody)
 }
 
 func (z *ZohoMailService) sendRawMail(toEmail, from, rawBody string) error {

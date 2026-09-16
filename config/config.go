@@ -20,6 +20,8 @@ type Config struct {
 	ZohoUser     string
 	ZohoPass     string
 	ZohoFrom     string
+	ResendApiKey string
+	ResendFrom   string
 }
 
 func LoadConfig() *Config {
@@ -42,6 +44,9 @@ func LoadConfig() *Config {
 	zohoPass := getEnv("ZOHO_SMTP_PASS", "")
 	zohoFrom := getEnv("ZOHO_FROM_EMAIL", zohoUser)
 
+	resendApiKey := getEnv("RESEND_API_KEY", "")
+	resendFrom := getEnv("RESEND_FROM_EMAIL", "Technik Olympiad <onboarding@resend.dev>")
+
 	return &Config{
 		Port:         port,
 		DatabaseURL:  dbURL,
@@ -55,6 +60,8 @@ func LoadConfig() *Config {
 		ZohoUser:     zohoUser,
 		ZohoPass:     zohoPass,
 		ZohoFrom:     zohoFrom,
+		ResendApiKey: resendApiKey,
+		ResendFrom:   resendFrom,
 	}
 }
 
