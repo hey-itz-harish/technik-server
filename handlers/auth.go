@@ -302,8 +302,11 @@ func (h *AuthHandler) resendActivationInternal(ctx context.Context, email string
 
 	activationLink := fmt.Sprintf("%s/activation-pending?token=%s&type=school", h.cfg.FrontendURL, activationToken)
 	resendLink := h.buildResendLink(email)
+	go func(toEmail, schoolName, actLink, resLink string) {
+		_ = h.zohoService.SendActivationEmail(toEmail, schoolName, actLink, resLink)
+	}(email, school.SchoolName, activationLink, resendLink)
 
-	return h.zohoService.SendActivationEmail(email, school.SchoolName, activationLink, resendLink)
+	return nil
 }
 
 // resendResultHTML renders a small, self-contained confirmation page since
