@@ -84,6 +84,7 @@ func (r *ResendMailService) SendEmail(toEmail, subject, htmlBody string) error {
 		if msg == "" {
 			msg = string(respBody)
 		}
+		logger.Error("Resend API failed (%d) for %s: %s", resp.StatusCode, toEmail, msg)
 		return fmt.Errorf("resend API error (%d): %s", resp.StatusCode, msg)
 	}
 

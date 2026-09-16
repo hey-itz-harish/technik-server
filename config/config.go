@@ -3,6 +3,7 @@ package config
 import (
 	"log"
 	"os"
+	"strings"
 
 	"github.com/joho/godotenv"
 )
@@ -36,7 +37,11 @@ func LoadConfig() *Config {
 	csrfSecret := getEnv("CSRF_SECRET", "default_csrf_secret_change_me_2026")
 	cookieDomain := getEnv("COOKIE_DOMAIN", "localhost")
 	cookieSecure := getEnv("COOKIE_SECURE", "false") == "true"
-	frontendURL := getEnv("FRONTEND_URL", "http://localhost:5173/#")
+	frontendRaw := getEnv("FRONTEND_URL", getEnv("FRONTEND", "https://www.technikolympiad.com"))
+	frontendURL := strings.TrimRight(frontendRaw, "/")
+	if !strings.HasPrefix(frontendURL, "http://") && !strings.HasPrefix(frontendURL, "https://") {
+		frontendURL = "https://" + frontendURL
+	}
 
 	zohoHost := getEnv("ZOHO_SMTP_HOST", "smtp.zoho.in")
 	zohoPort := getEnv("ZOHO_SMTP_PORT", "587")

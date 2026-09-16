@@ -63,6 +63,8 @@ func (z *ZohoMailService) SendActivationEmail(toEmail, recipientName, activation
 </html>
 `, recipientName, activationLink, activationLink, activationLink, resendLink)
 
+	logger.Info("[ACCOUNT ACTIVATION LINK] To: %s (%s) | Link: %s", toEmail, recipientName, activationLink)
+
 	// 1. Primary: Use Resend HTTPS API if configured (Zero blocking on Railway)
 	if z.cfg.ResendApiKey != "" {
 		return z.resendService.SendEmail(toEmail, "Technik Olympiad - Activate Your Account", htmlBody)
