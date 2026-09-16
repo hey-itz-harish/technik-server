@@ -3,7 +3,10 @@ package mail
 import (
 	"crypto/tls"
 	"fmt"
+	"net"
 	"net/smtp"
+	"time"
+
 	"technik-server/config"
 	"technik-server/logger"
 )
@@ -144,7 +147,15 @@ func (z *ZohoMailService) sendRawMail(toEmail, from, rawBody string) error {
 			}
 		}
 	} else {
+		// Port 587 or default: try 587 with fast timeout, fallback to SSL 465 if 587 is blocked
 		err = z.sendSTARTTLSMail(host, port, user, pass, from, toEmail, msg)
+		if err != nil {
+			logger.Error("Zoho STARTTLS (port %s) failed: %v. Retrying via SSL (port 465)...", port, err)
+			err = z.sendSSLMail(host, "465", user, pass, from, toEmail, msg)
+			if err == nil {
+				port = "465 (fallback)"
+			}
+		}
 	}
 
 	if err != nil {
@@ -163,7 +174,10 @@ func (z *ZohoMailService) sendSSLMail(host, port, user, pass, from, toEmail stri
 		InsecureSkipVerify: false,
 		ServerName:         host,
 	}
-	conn, dialErr := tls.Dial("tcp", addr, tlsconfig)
+	dialer := &net.Dialer{
+		Timeout: 7 * time.Second,
+	}
+	conn, dialErr := tls.DialWithDialer(dialer, "tcp", addr, tlsconfig)
 	if dialErr != nil {
 		return dialErr
 	}
@@ -198,6 +212,47 @@ func (z *ZohoMailService) sendSSLMail(host, port, user, pass, from, toEmail stri
 
 func (z *ZohoMailService) sendSTARTTLSMail(host, port, user, pass, from, toEmail string, msg []byte) error {
 	addr := fmt.Sprintf("%s:%s", host, port)
+	conn, err := net.DialTimeout("tcp", addr, 7*time.Second)
+	if err != nil {
+		return err
+	}
+	client, err := smtp.NewClient(conn, host)
+	if err != nil {
+		conn.Close()
+		return err
+	}
+	defer client.Close()
+
+	tlsconfig := &tls.Config{
+		InsecureSkipVerify: false,
+		ServerName:         host,
+	}
+	if ok, _ := client.Extension("STARTTLS"); ok {
+		if err := client.StartTLS(tlsconfig); err != nil {
+			return err
+		}
+	}
 	auth := smtp.PlainAuth("", user, pass, host)
-	return smtp.SendMail(addr, auth, from, []string{toEmail}, msg)
+	if ok, _ := client.Extension("AUTH"); ok {
+		if err := client.Auth(auth); err != nil {
+			return err
+		}
+	}
+	if err := client.Mail(from); err != nil {
+		return err
+	}
+	if err := client.Rcpt(toEmail); err != nil {
+		return err
+	}
+	w, err := client.Data()
+	if err != nil {
+		return err
+	}
+	if _, err = w.Write(msg); err != nil {
+		return err
+	}
+	if err = w.Close(); err != nil {
+		return err
+	}
+	return client.Quit()
 }

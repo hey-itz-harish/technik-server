@@ -794,8 +794,10 @@ func (h *AuthHandler) RegisterSchool(c *gin.Context) {
 	activationLink := fmt.Sprintf("%s/activation-pending?token=%s&type=school", h.cfg.FrontendURL, activationToken)
 	resendLink := h.buildResendLink(req.Email)
 
-	// Send activation email link via Zoho Mail Service
-	_ = h.zohoService.SendActivationEmail(req.Email, req.SchoolName, activationLink, resendLink)
+	// Send activation email link asynchronously in background goroutine so registration response is instant
+	go func(toEmail, schoolName, actLink, resLink string) {
+		_ = h.zohoService.SendActivationEmail(toEmail, schoolName, actLink, resLink)
+	}(req.Email, req.SchoolName, activationLink, resendLink)
 
 	// The account isn't activated yet, so there's no session or profile to
 	// hand back — just the email, for the Activation Pending page.
