@@ -184,7 +184,7 @@ func (z *ZohoMailService) sendRawMail(toEmail, from, rawBody string) error {
 }
 
 func (z *ZohoMailService) sendSSLMail(host, port, user, pass, from, toEmail string, msg []byte) error {
-	addr := fmt.Sprintf("%s:%s", host, port)
+	addr := net.JoinHostPort(host, port)
 	auth := smtp.PlainAuth("", user, pass, host)
 	tlsconfig := &tls.Config{
 		InsecureSkipVerify: false,
@@ -227,7 +227,7 @@ func (z *ZohoMailService) sendSSLMail(host, port, user, pass, from, toEmail stri
 }
 
 func (z *ZohoMailService) sendSTARTTLSMail(host, port, user, pass, from, toEmail string, msg []byte) error {
-	addr := fmt.Sprintf("%s:%s", host, port)
+	addr := net.JoinHostPort(host, port)
 	conn, err := net.DialTimeout("tcp", addr, 7*time.Second)
 	if err != nil {
 		return err
