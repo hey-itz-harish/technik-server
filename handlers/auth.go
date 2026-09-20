@@ -220,12 +220,18 @@ func (h *AuthHandler) GetActivationStatus(c *gin.Context) {
 		}
 
 		if err == nil && school != nil {
+			var mfaSetupToken string
+			if school.IsActivated && !school.TwoFactorEnable {
+				mfaSetupToken, _ = middleware.GeneratePurposeToken(school.Email, "school", "mfa-setup", h.cfg.JWTSecret, 30*time.Minute)
+			}
+
 			c.JSON(http.StatusOK, gin.H{
 				"success":         true,
 				"isActivated":     school.IsActivated,
 				"email":           school.Email,
 				"schoolName":      school.SchoolName,
 				"twoFactorEnable": school.TwoFactorEnable,
+				"mfaSetupToken":   mfaSetupToken,
 			})
 			return
 		}
@@ -301,7 +307,7 @@ func (h *AuthHandler) resendActivationInternal(ctx context.Context, email string
 		return fmt.Errorf("failed to regenerate the activation token")
 	}
 
-	activationLink := fmt.Sprintf("%s/activation-pending?token=%s&type=school", h.cfg.FrontendURL, activationToken)
+	activationLink := fmt.Sprintf("%s/#/activation-pending?token=%s&type=school", h.cfg.FrontendURL, activationToken)
 	resendLink := h.buildResendLink(email)
 	go func(toEmail, schoolName, actLink, resLink string) {
 		_ = h.zohoService.SendActivationEmail(toEmail, schoolName, actLink, resLink)
@@ -795,7 +801,7 @@ func (h *AuthHandler) RegisterSchool(c *gin.Context) {
 	// Build the primary activation link (points at the frontend SPA) and a
 	// long-lived resend link (points at the backend directly, opened from
 	// the email itself, in case the 24h activation link has expired).
-	activationLink := fmt.Sprintf("%s/activation-pending?token=%s&type=school", h.cfg.FrontendURL, activationToken)
+	activationLink := fmt.Sprintf("%s/#/activation-pending?token=%s&type=school", h.cfg.FrontendURL, activationToken)
 	resendLink := h.buildResendLink(req.Email)
 
 	// Send activation email link asynchronously in background goroutine so registration response is instant
