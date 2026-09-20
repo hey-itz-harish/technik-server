@@ -11,6 +11,7 @@ import (
 	"technik-server/config"
 	"technik-server/database"
 	"technik-server/dto"
+	"technik-server/logger"
 	"technik-server/mail"
 	"technik-server/middleware"
 	"technik-server/prisma/db"
@@ -1067,6 +1068,44 @@ func (h *AuthHandler) GetMe(c *gin.Context) {
 		SessionExpiry:   sExp,
 		CreatedAt:       user.CreatedAt,
 		UpdatedAt:       user.UpdatedAt,
+	})
+}
+
+// SubmitContactEnquiry handles public contact messages and forwards them to support@technikolympiad.com
+func (h *AuthHandler) SubmitContactEnquiry(c *gin.Context) {
+	var req dto.ContactEnquiryRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, dto.APIError{
+			Success: false,
+			Error:   "Please fill in all required fields (Name, Email, Subject, and Message).",
+		})
+		return
+	}
+
+	name := strings.TrimSpace(req.Name)
+	email := strings.TrimSpace(req.Email)
+	subject := strings.TrimSpace(req.Subject)
+	message := strings.TrimSpace(req.Message)
+	phone := strings.TrimSpace(req.Phone)
+
+	if name == "" || email == "" || subject == "" || message == "" {
+		c.JSON(http.StatusBadRequest, dto.APIError{
+			Success: false,
+			Error:   "Name, Email, Subject, and Message cannot be empty.",
+		})
+		return
+	}
+
+	// Send email asynchronously so user doesn't wait
+	go func() {
+		if err := h.zohoService.SendContactEnquiryEmail(name, email, phone, subject, message); err != nil {
+			logger.Error("Failed to deliver contact inquiry email for %s: %v", email, err)
+		}
+	}()
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "Your message has been sent successfully. We will get back to you shortly.",
 	})
 }
 

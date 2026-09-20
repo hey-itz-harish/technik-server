@@ -145,6 +145,92 @@ func (z *ZohoMailService) SendOTPEmail(toEmail, recipientName, otpCode string) e
 	return z.sendRawMail(toEmail, from, subject+mime+htmlBody)
 }
 
+// SendContactEnquiryEmail sends contact form submissions to support@technikolympiad.com
+func (z *ZohoMailService) SendContactEnquiryEmail(name, email, phone, subject, message string) error {
+	recipient := "support@technikolympiad.com"
+	if z.cfg.ZohoFrom != "" {
+		recipient = z.cfg.ZohoFrom
+	}
+
+	phoneText := phone
+	if phoneText == "" {
+		phoneText = "Not provided"
+	}
+
+	mailSubject := fmt.Sprintf("Website Contact: %s - %s", subject, name)
+
+	htmlBody := fmt.Sprintf(`
+<!DOCTYPE html>
+<html>
+<body style="font-family: Arial, sans-serif; background-color: #f8fafc; margin: 0; padding: 20px;">
+  <div style="max-width: 560px; margin: 0 auto; background: #ffffff; padding: 35px; border-radius: 16px; border: 1px solid #e2e8f0; box-shadow: 0 4px 20px rgba(0,0,0,0.05);">
+    <div style="text-align: center; margin-bottom: 25px;">
+      <h2 style="color: #0c1e45; margin: 0; font-size: 24px; font-weight: 800;">TECHNIK OLYMPIAD</h2>
+      <p style="color: #64748b; font-size: 13px; margin-top: 4px;">New Contact Form Message</p>
+    </div>
+
+    <div style="background-color: #f8fafc; border-radius: 12px; padding: 20px; border: 1px solid #e2e8f0; margin-bottom: 25px;">
+      <table style="width: 100%%; border-collapse: collapse; font-size: 14px;">
+        <tr>
+          <td style="padding: 8px 0; color: #64748b; width: 35%%;"><strong>Subject:</strong></td>
+          <td style="padding: 8px 0; color: #0c1e45; font-weight: bold;">%s</td>
+        </tr>
+        <tr>
+          <td style="padding: 8px 0; color: #64748b;"><strong>Sender Name:</strong></td>
+          <td style="padding: 8px 0; color: #0c1e45; font-weight: 600;">%s</td>
+        </tr>
+        <tr>
+          <td style="padding: 8px 0; color: #64748b;"><strong>Sender Email:</strong></td>
+          <td style="padding: 8px 0; color: #2563eb;"><a href="mailto:%s" style="color: #2563eb; text-decoration: none;">%s</a></td>
+        </tr>
+        <tr>
+          <td style="padding: 8px 0; color: #64748b;"><strong>Phone Number:</strong></td>
+          <td style="padding: 8px 0; color: #0c1e45;">%s</td>
+        </tr>
+      </table>
+    </div>
+
+    <div style="margin-bottom: 25px;">
+      <h4 style="color: #0c1e45; margin: 0 0 10px 0; font-size: 14px; text-transform: uppercase; letter-spacing: 0.05em;">Message Body:</h4>
+      <div style="background-color: #ffffff; border-left: 4px solid #f97316; border-top: 1px solid #f1f5f9; border-right: 1px solid #f1f5f9; border-bottom: 1px solid #f1f5f9; padding: 18px; border-radius: 8px; color: #334155; font-size: 14px; line-height: 1.6; white-space: pre-wrap;">%s</div>
+    </div>
+
+    <hr style="border: none; border-top: 1px solid #f1f5f9; margin: 25px 0;">
+    <p style="font-size: 12px; color: #94a3b8; text-align: center; margin: 0;">
+      © 2026 Technik Olympiad. All rights reserved.
+    </p>
+  </div>
+</body>
+</html>
+`, subject, name, email, email, phoneText, message)
+
+	logger.Info("[CONTACT INQUIRY] From: %s (%s) | Subject: %s", email, name, subject)
+
+	// 1. Primary: Use Resend HTTPS API if configured (Zero blocking on Railway)
+	if z.cfg.ResendApiKey != "" {
+		return z.resendService.SendEmail(recipient, mailSubject, htmlBody)
+	}
+
+	// 2. Secondary: Fallback to Zoho SMTP if configured
+	if z.cfg.ZohoUser == "" || z.cfg.ZohoPass == "" {
+		logger.Error("Neither RESEND_API_KEY nor ZOHO_SMTP credentials are configured in .env")
+		logger.Info("--------------------------------------------------")
+		logger.Info("[DEV MOCK CONTACT MESSAGE] To: %s | From: %s (%s) | Subject: %s | Message: %s", recipient, email, name, subject, message)
+		logger.Info("--------------------------------------------------")
+		return nil
+	}
+
+	from := z.cfg.ZohoFrom
+	if from == "" {
+		from = z.cfg.ZohoUser
+	}
+
+	subjectLine := fmt.Sprintf("Subject: %s\n", mailSubject)
+	mime := "MIME-version: 1.0;\nContent-Type: text/html; charset=\"UTF-8\";\nFrom: Technik Olympiad <" + from + ">\nTo: " + recipient + "\nReply-To: " + email + "\n\n"
+
+	return z.sendRawMail(recipient, from, subjectLine+mime+htmlBody)
+}
+
 func (z *ZohoMailService) sendRawMail(toEmail, from, rawBody string) error {
 	msg := []byte(rawBody)
 	host := z.cfg.ZohoHost

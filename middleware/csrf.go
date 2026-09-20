@@ -81,6 +81,7 @@ func CSRFMiddleware(cfg *config.Config) gin.HandlerFunc {
 			strings.HasSuffix(path, "/login") ||
 			strings.HasSuffix(path, "/verify-otp") ||
 			strings.HasSuffix(path, "/send-otp") ||
+			strings.HasSuffix(path, "/contact") ||
 			strings.Contains(path, "/otp") ||
 			strings.Contains(path, "/activate") ||
 			strings.Contains(path, "/resend-activation") ||

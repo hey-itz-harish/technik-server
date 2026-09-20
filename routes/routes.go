@@ -97,6 +97,9 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			school.POST("/login", authHandler.LoginSchool)
 		}
 
+		// Public Contact Us & Inquiries route
+		api.POST("/contact", authHandler.SubmitContactEnquiry)
+
 		// Authenticated School Portal & Technik Competition routes
 		portal := api.Group("")
 		portal.Use(middleware.AuthMiddleware(cfg))
