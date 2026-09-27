@@ -375,9 +375,12 @@ func (h *AdminHandler) CreateAdminUser(c *gin.Context) {
 		return
 	}
 
+	// Send Welcome & Passcode Email via Resend/Zoho using noreply@technikolympiad.com
+	_ = h.zohoService.SendAdminWelcomeEmail(newUser.Email, newUser.Name, req.Role, req.Zone, password)
+
 	c.JSON(http.StatusCreated, gin.H{
 		"success": true,
-		"message": "Admin user created successfully",
+		"message": "Admin user registered and official passcode email sent successfully",
 		"user": dto.AdminUserDTO{
 			ID:        newUser.ID,
 			Name:      newUser.Name,

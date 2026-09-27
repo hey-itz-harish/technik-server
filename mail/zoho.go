@@ -231,6 +231,103 @@ func (z *ZohoMailService) SendContactEnquiryEmail(name, email, phone, subject, m
 	return z.sendRawMail(recipient, from, subjectLine+mime+htmlBody)
 }
 
+// SendAdminWelcomeEmail sends an onboarding credentials email to newly created Conducting Professionals / Admins
+func (z *ZohoMailService) SendAdminWelcomeEmail(toEmail, recipientName, role, zone, password string) error {
+	if role == "" {
+		role = "Technik Conducting Professional / Admin"
+	}
+	if zone == "" {
+		zone = "Central Headquarters"
+	}
+
+	portalLink := z.cfg.FrontendURL + "#/portal"
+
+	htmlBody := fmt.Sprintf(`
+<!DOCTYPE html>
+<html>
+<body style="font-family: Arial, sans-serif; background-color: #f8fafc; margin: 0; padding: 20px;">
+  <div style="max-width: 540px; margin: 0 auto; background: #ffffff; padding: 35px; border-radius: 16px; border: 1px solid #e2e8f0; box-shadow: 0 4px 20px rgba(0,0,0,0.05);">
+    <div style="text-align: center; margin-bottom: 25px;">
+      <h2 style="color: #0c1e45; margin: 0; font-size: 24px; font-weight: 800;">TECHNIK OLYMPIAD</h2>
+      <p style="color: #ea580c; font-size: 13px; font-weight: bold; margin-top: 4px; text-transform: uppercase; letter-spacing: 0.05em;">Official Conducting Portal Access</p>
+    </div>
+
+    <p style="color: #334155; font-size: 15px;">Dear <strong>%s</strong>,</p>
+    <p style="color: #475569; font-size: 14px; line-height: 1.6;">
+      You have been officially registered as a <strong>Technik Conducting Professional / Administrator</strong> for Technik Olympiad. Below are your official portal credentials and access details:
+    </p>
+
+    <div style="background-color: #f8fafc; border-radius: 12px; padding: 20px; border: 1px solid #e2e8f0; margin: 20px 0;">
+      <table style="width: 100%%; border-collapse: collapse; font-size: 14px;">
+        <tr>
+          <td style="padding: 8px 0; color: #64748b; width: 40%%;"><strong>Official Email:</strong></td>
+          <td style="padding: 8px 0; color: #0c1e45; font-weight: bold;">%s</td>
+        </tr>
+        <tr>
+          <td style="padding: 8px 0; color: #64748b;"><strong>Temporary Passcode:</strong></td>
+          <td style="padding: 8px 0; color: #ea580c; font-weight: bold; font-family: monospace; font-size: 16px;">%s</td>
+        </tr>
+        <tr>
+          <td style="padding: 8px 0; color: #64748b;"><strong>Assigned Role:</strong></td>
+          <td style="padding: 8px 0; color: #2563eb; font-weight: 600;">%s</td>
+        </tr>
+        <tr>
+          <td style="padding: 8px 0; color: #64748b;"><strong>Zone / Region:</strong></td>
+          <td style="padding: 8px 0; color: #334155;">%s</td>
+        </tr>
+      </table>
+    </div>
+
+    <div style="text-align: center; margin: 30px 0;">
+      <a href="%s" style="background: linear-gradient(135deg, #0c1e45 0%%, #f97316 100%%); color: #ffffff; font-size: 15px; font-weight: bold; text-decoration: none; padding: 14px 28px; border-radius: 10px; display: inline-block;">
+        Log In to Technik Portal
+      </a>
+    </div>
+
+    <div style="background: #eff6ff; border-left: 4px solid #2563eb; padding: 12px 16px; border-radius: 6px; margin: 20px 0;">
+      <p style="color: #1e40af; font-size: 12.5px; margin: 0; line-height: 1.5;">
+        🔐 <strong>Security Note:</strong> When logging in, a 6-digit One-Time Password (OTP) will be sent to your registered email for two-factor verification.
+      </p>
+    </div>
+
+    <hr style="border: none; border-top: 1px solid #f1f5f9; margin: 25px 0;">
+    <p style="font-size: 12px; color: #94a3b8; text-align: center; margin: 0;">
+      © 2026 Technik Olympiad Private Limited. All rights reserved.
+    </p>
+  </div>
+</body>
+</html>
+`, recipientName, toEmail, password, role, zone, portalLink)
+
+	logger.Info("[ADMIN WELCOME EMAIL] To: %s (%s) | Role: %s | Zone: %s", toEmail, recipientName, role, zone)
+
+	mailSubject := "Technik Olympiad - Official Conducting Portal Access & Passcode"
+
+	// 1. Primary: Use Resend HTTPS API if configured (From: noreply@technikolympiad.com)
+	if z.cfg.ResendApiKey != "" {
+		return z.resendService.SendEmail(toEmail, mailSubject, htmlBody)
+	}
+
+	// 2. Secondary: Fallback to Zoho SMTP if configured
+	if z.cfg.ZohoUser == "" || z.cfg.ZohoPass == "" {
+		logger.Error("Neither RESEND_API_KEY nor ZOHO_SMTP credentials are configured in .env")
+		logger.Info("--------------------------------------------------")
+		logger.Info("[DEV MOCK ADMIN WELCOME EMAIL] To: %s (%s) | Passcode: %s | Portal: %s", toEmail, recipientName, password, portalLink)
+		logger.Info("--------------------------------------------------")
+		return nil
+	}
+
+	from := z.cfg.ZohoFrom
+	if from == "" {
+		from = z.cfg.ZohoUser
+	}
+
+	subject := fmt.Sprintf("Subject: %s\n", mailSubject)
+	mime := "MIME-version: 1.0;\nContent-Type: text/html; charset=\"UTF-8\";\nFrom: Technik Olympiad <" + from + ">\nTo: " + toEmail + "\n\n"
+
+	return z.sendRawMail(toEmail, from, subject+mime+htmlBody)
+}
+
 func (z *ZohoMailService) sendRawMail(toEmail, from, rawBody string) error {
 	msg := []byte(rawBody)
 	host := z.cfg.ZohoHost
