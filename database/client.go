@@ -15,13 +15,22 @@ import (
 
 var (
 	Client *db.PrismaClient
+	SQLDB  *sql.DB
 	mu     sync.Mutex
 )
 
-// InitDB initializes and connects the Prisma Go client to PostgreSQL
+// InitDB initializes and connects the Prisma Go client and raw PostgreSQL connection
 func InitDB() *db.PrismaClient {
 	mu.Lock()
 	defer mu.Unlock()
+
+	dbURL := os.Getenv("DATABASE_URL")
+	if SQLDB == nil && dbURL != "" {
+		raw, err := sql.Open("postgres", dbURL)
+		if err == nil {
+			SQLDB = raw
+		}
+	}
 
 	if Client == nil {
 		Client = db.NewClient()
@@ -39,7 +48,23 @@ func InitDB() *db.PrismaClient {
 	return Client
 }
 
-// AutoMigrateSchema ensures all required columns exist on remote PostgreSQL tables
+// GetSQLDB returns the active raw SQL database connection
+func GetSQLDB() *sql.DB {
+	mu.Lock()
+	defer mu.Unlock()
+	if SQLDB == nil {
+		dbURL := os.Getenv("DATABASE_URL")
+		if dbURL != "" {
+			raw, err := sql.Open("postgres", dbURL)
+			if err == nil {
+				SQLDB = raw
+			}
+		}
+	}
+	return SQLDB
+}
+
+// AutoMigrateSchema ensures all required columns and tables exist on PostgreSQL
 func AutoMigrateSchema() {
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
@@ -62,12 +87,30 @@ func AutoMigrateSchema() {
 		`ALTER TABLE "StudentDetails" ADD COLUMN IF NOT EXISTS "status" TEXT DEFAULT 'Registered & Verified';`,
 		`ALTER TABLE "StudentDetails" ADD COLUMN IF NOT EXISTS "academicYear" INT DEFAULT 2026;`,
 		`ALTER TABLE "OlympiadStudent" ADD COLUMN IF NOT EXISTS "classCategory" TEXT;`,
+		`CREATE TABLE IF NOT EXISTS "NewsEvents" (
+			"id" TEXT PRIMARY KEY,
+			"type" TEXT NOT NULL,
+			"title" TEXT NOT NULL,
+			"description" TEXT,
+			"date" TEXT,
+			"category" TEXT,
+			"location" TEXT,
+			"image_url" TEXT,
+			"link_url" TEXT,
+			"is_published" BOOLEAN DEFAULT true,
+			"created_at" TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+			"updated_at" TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+		);`,
 	}
 
 	for _, q := range alterQueries {
 		_, _ = rawDB.Exec(q)
 	}
-	log.Println("PostgreSQL database schema columns verified & auto-migrated successfully.")
+
+	// Remove any dummy seeded records if existing
+	_, _ = rawDB.Exec(`DELETE FROM "NewsEvents" WHERE id IN ('news-1', 'news-2', 'news-3', 'event-1');`)
+
+	log.Println("PostgreSQL database schema columns & NewsEvents table verified successfully.")
 }
 
 // SeedSuperAdmin creates the initial Super Admin user if not existing

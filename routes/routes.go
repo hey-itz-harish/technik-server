@@ -63,7 +63,16 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			admin.GET("/olympiad-registrations", adminHandler.GetAdminOlympiadRegistrations)
 			admin.GET("/users", adminHandler.GetAdminUsers)
 			admin.POST("/users", adminHandler.CreateAdminUser)
+
+			// News & Events Management
+			admin.GET("/news-events", adminHandler.GetNewsEvents)
+			admin.POST("/news-events", adminHandler.CreateNewsEvent)
+			admin.PUT("/news-events/:id", adminHandler.UpdateNewsEvent)
+			admin.DELETE("/news-events/:id", adminHandler.DeleteNewsEvent)
 		}
+
+		// Public News & Events endpoint for frontend / cards
+		api.GET("/news-events", adminHandler.GetNewsEvents)
 
 		// Global Auth & OTP routes
 		auth := api.Group("/auth")
