@@ -118,39 +118,14 @@ func (h *TechnikHandler) NominateTechnikPride(c *gin.Context) {
 			).Exec(ctx)
 		}
 
-		var existingJrCount, existingSrCount int
-		for _, ex := range existingNoms {
-			cat, _ := ex.ClassCategory()
-			if isJuniorLevel(ex.Class, cat) {
-				existingJrCount++
-			} else {
-				existingSrCount++
-			}
-		}
+		existingCount := len(existingNoms)
+		incomingCount := len(batchReq.Nominations)
 
-		// Count incoming
-		var incomingJrCount, incomingSrCount int
-		for _, nom := range batchReq.Nominations {
-			if isJuniorLevel(nom.Class, nom.ClassCategory) {
-				incomingJrCount++
-			} else {
-				incomingSrCount++
-			}
-		}
-
-		// Enforce Quota: Max 3 Junior & Max 3 Senior per year (Total 6)
-		if existingJrCount+incomingJrCount > 3 {
+		// Enforce Quota: Max 2 nominations per school per academic year
+		if existingCount+incomingCount > 2 {
 			c.JSON(http.StatusBadRequest, dto.APIError{
 				Success: false,
-				Error: fmt.Sprintf("Annual Quota Limit Exceeded: Junior Level (Grades 3-5) allows a maximum of 3 nominations per year. You have %d registered and attempted to add %d more.", existingJrCount, incomingJrCount),
-			})
-			return
-		}
-
-		if existingSrCount+incomingSrCount > 3 {
-			c.JSON(http.StatusBadRequest, dto.APIError{
-				Success: false,
-				Error: fmt.Sprintf("Annual Quota Limit Exceeded: Senior Level (Grades 6-8) allows a maximum of 3 nominations per year. You have %d registered and attempted to add %d more.", existingSrCount, incomingSrCount),
+				Error: fmt.Sprintf("Annual Quota Limit Exceeded: Each school can nominate a maximum of 2 students per academic year. You have %d registered and attempted to add %d more.", existingCount, incomingCount),
 			})
 			return
 		}
@@ -162,10 +137,7 @@ func (h *TechnikHandler) NominateTechnikPride(c *gin.Context) {
 				schoolID = targetSchoolID
 			}
 
-			normCategory := "Grade 6 to 8 (Senior Level)"
-			if isJuniorLevel(nom.Class, nom.ClassCategory) {
-				normCategory = "Grade 3 to 5 (Jr Level)"
-			}
+			normCategory := "Technik Pride Award"
 			if nom.ClassCategory != "" {
 				normCategory = nom.ClassCategory
 			}
@@ -274,36 +246,16 @@ func (h *TechnikHandler) NominateTechnikPride(c *gin.Context) {
 		).Exec(ctx)
 	}
 
-	var existingJrCount, existingSrCount int
-	for _, ex := range existingNoms {
-		cat, _ := ex.ClassCategory()
-		if isJuniorLevel(ex.Class, cat) {
-			existingJrCount++
-		} else {
-			existingSrCount++
-		}
-	}
-
-	isJr := isJuniorLevel(singleReq.Class, singleReq.ClassCategory)
-	if isJr && existingJrCount >= 3 {
+	existingCount := len(existingNoms)
+	if existingCount >= 2 {
 		c.JSON(http.StatusBadRequest, dto.APIError{
 			Success: false,
-			Error:   fmt.Sprintf("Annual Quota Limit Exceeded: Junior Level (Grades 3-5) allows a maximum of 3 nominations per year (currently %d registered).", existingJrCount),
-		})
-		return
-	}
-	if !isJr && existingSrCount >= 3 {
-		c.JSON(http.StatusBadRequest, dto.APIError{
-			Success: false,
-			Error:   fmt.Sprintf("Annual Quota Limit Exceeded: Senior Level (Grades 6-8) allows a maximum of 3 nominations per year (currently %d registered).", existingSrCount),
+			Error:   fmt.Sprintf("Annual Quota Limit Exceeded: Each school can nominate a maximum of 2 students per academic year (currently %d registered).", existingCount),
 		})
 		return
 	}
 
-	normCategory := "Grade 6 to 8 (Senior Level)"
-	if isJr {
-		normCategory = "Grade 3 to 5 (Jr Level)"
-	}
+	normCategory := "Technik Pride Award"
 	if singleReq.ClassCategory != "" {
 		normCategory = singleReq.ClassCategory
 	}
@@ -511,11 +463,7 @@ func (h *TechnikHandler) GetSchoolStudents(c *gin.Context) {
 			schID, _ := nom.SchoolID()
 			clsCat, _ := nom.ClassCategory()
 			if clsCat == "" {
-				if isJuniorLevel(nom.Class, "") {
-					clsCat = "Grade 3 to 5 (Jr Level)"
-				} else {
-					clsCat = "Grade 6 to 8 (Senior Level)"
-				}
+				clsCat = "Technik Pride Award"
 			}
 			nomStat, _ := nom.NominationStatus()
 			if nomStat == "" {
@@ -528,13 +476,6 @@ func (h *TechnikHandler) GetSchoolStudents(c *gin.Context) {
 			}
 
 			displayGrade := nom.Class
-			if clsCat != "" && !strings.Contains(displayGrade, "(") {
-				if strings.Contains(clsCat, "Jr") {
-					displayGrade = fmt.Sprintf("%s (Jr Level)", nom.Class)
-				} else if strings.Contains(clsCat, "Senior") || strings.Contains(clsCat, "Sr") {
-					displayGrade = fmt.Sprintf("%s (Sr Level)", nom.Class)
-				}
-			}
 
 			combined = append(combined, dto.StudentResponse{
 				ID:            nom.ID,

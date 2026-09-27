@@ -181,11 +181,7 @@ func (h *AdminHandler) GetAdminPrideNominations(c *gin.Context) {
 
 		clsCat, _ := nom.ClassCategory()
 		if clsCat == "" {
-			if isJuniorLevel(nom.Class, "") {
-				clsCat = "Junior Level"
-			} else {
-				clsCat = "Senior Level"
-			}
+			clsCat = "Technik Pride Award"
 		}
 
 		doc, _ := nom.SupportingDocument()
