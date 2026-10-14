@@ -113,3 +113,31 @@ func AuthMiddleware(cfg *config.Config) gin.HandlerFunc {
 		c.Next()
 	}
 }
+
+// AdminOnlyMiddleware ensures that the authenticated caller has an admin role
+func AdminOnlyMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		roleVal, exists := c.Get("userRole")
+		if !exists {
+			c.JSON(http.StatusUnauthorized, dto.APIError{
+				Success: false,
+				Error:   "Authentication required",
+			})
+			c.Abort()
+			return
+		}
+
+		role, ok := roleVal.(string)
+		if !ok || (strings.ToLower(role) != "admin") {
+			c.JSON(http.StatusForbidden, dto.APIError{
+				Success: false,
+				Error:   "Access denied. Administrator privileges required.",
+			})
+			c.Abort()
+			return
+		}
+
+		c.Next()
+	}
+}
+

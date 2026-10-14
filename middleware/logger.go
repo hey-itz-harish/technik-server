@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"strings"
 	"time"
 
 	"technik-server/database"
@@ -16,7 +17,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 )
-
 
 type bodyLogWriter struct {
 	gin.ResponseWriter
@@ -32,9 +32,66 @@ func sanitizeBody(bodyStr string) string {
 	if bodyStr == "" {
 		return ""
 	}
-	// Simple regex or string replacement to mask sensitive parameters like passwords
 	re := regexp.MustCompile(`"(password|token|otp)":\s*"[^"]*"`)
 	return re.ReplaceAllString(bodyStr, `"$1": "***masked***"`)
+}
+
+type auditLogEntry struct {
+	method       string
+	path         string
+	ip           string
+	userAgent    string
+	userEmail    string
+	requestBody  string
+	responseBody string
+	statusCode   int
+	latency      time.Duration
+}
+
+// Bounded queue buffer to prevent database thread starvation under peak loads
+var auditLogChan = make(chan auditLogEntry, 1000)
+
+func init() {
+	go auditLogWorker()
+}
+
+func auditLogWorker() {
+	for entry := range auditLogChan {
+		if database.Client == nil {
+			continue
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		var optionalParams []db.AuditLogSetParam
+		if entry.userEmail != "" {
+			optionalParams = append(optionalParams, db.AuditLog.UserEmail.Set(entry.userEmail))
+		}
+		if entry.ip != "" {
+			optionalParams = append(optionalParams, db.AuditLog.IPAddress.Set(entry.ip))
+		}
+		if entry.userAgent != "" {
+			optionalParams = append(optionalParams, db.AuditLog.UserAgent.Set(entry.userAgent))
+		}
+		if entry.requestBody != "" {
+			optionalParams = append(optionalParams, db.AuditLog.RequestBody.Set(entry.requestBody))
+		}
+		if entry.responseBody != "" {
+			resp := entry.responseBody
+			if len(resp) > 2000 {
+				resp = resp[:2000] + "...(truncated)"
+			}
+			optionalParams = append(optionalParams, db.AuditLog.ResponseBody.Set(resp))
+		}
+
+		_, _ = database.Client.AuditLog.CreateOne(
+			db.AuditLog.Method.Set(entry.method),
+			db.AuditLog.Path.Set(entry.path),
+			db.AuditLog.StatusCode.Set(entry.statusCode),
+			db.AuditLog.LatencyMs.Set(int(entry.latency.Milliseconds())),
+			optionalParams...,
+		).Exec(ctx)
+		cancel()
+	}
 }
 
 // RequestLoggerMiddleware logs HTTP requests, latency, request/response payload into AuditLog database
@@ -44,14 +101,22 @@ func RequestLoggerMiddleware() gin.HandlerFunc {
 		path := c.Request.URL.Path
 		raw := c.Request.URL.RawQuery
 
-		// Capture request body
+		// Capture request body safely without memory leaks on large multipart file uploads
 		var reqBodyStr string
-		if c.Request.Body != nil {
+		contentType := c.ContentType()
+		isMultipart := strings.HasPrefix(contentType, "multipart/form-data")
+		isLarge := c.Request.ContentLength > 64*1024 // 64 KB threshold
+
+		if c.Request.Body != nil && !isMultipart && !isLarge {
 			reqBodyBytes, _ := io.ReadAll(c.Request.Body)
 			c.Request.Body = io.NopCloser(bytes.NewBuffer(reqBodyBytes))
 			if len(reqBodyBytes) > 0 {
 				reqBodyStr = sanitizeBody(string(reqBodyBytes))
 			}
+		} else if isMultipart {
+			reqBodyStr = "[multipart/form-data payload omitted from audit log]"
+		} else if isLarge {
+			reqBodyStr = "[large payload >64KB omitted from audit log]"
 		}
 
 		// Intercept response body
@@ -82,42 +147,22 @@ func RequestLoggerMiddleware() gin.HandlerFunc {
 		// Console Structured Logger
 		logger.LogRequest(method, path, clientIP, statusCode, latency, errMessage)
 
-		// Async Audit Log Persistence to DB
-		go func(m, p, ip, ua, email, reqBody, respBody string, status int, lat time.Duration) {
-			if database.Client != nil {
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer cancel()
-
-				var optionalParams []db.AuditLogSetParam
-				if email != "" {
-					optionalParams = append(optionalParams, db.AuditLog.UserEmail.Set(email))
-				}
-				if ip != "" {
-					optionalParams = append(optionalParams, db.AuditLog.IPAddress.Set(ip))
-				}
-				if ua != "" {
-					optionalParams = append(optionalParams, db.AuditLog.UserAgent.Set(ua))
-				}
-				if reqBody != "" {
-					optionalParams = append(optionalParams, db.AuditLog.RequestBody.Set(reqBody))
-				}
-				if respBody != "" {
-					// Truncate response body if overly large for audit storage (max 2000 chars)
-					if len(respBody) > 2000 {
-						respBody = respBody[:2000] + "...(truncated)"
-					}
-					optionalParams = append(optionalParams, db.AuditLog.ResponseBody.Set(respBody))
-				}
-
-				_, _ = database.Client.AuditLog.CreateOne(
-					db.AuditLog.Method.Set(m),
-					db.AuditLog.Path.Set(p),
-					db.AuditLog.StatusCode.Set(status),
-					db.AuditLog.LatencyMs.Set(int(lat.Milliseconds())),
-					optionalParams...,
-				).Exec(ctx)
-			}
-		}(method, path, clientIP, userAgent, userEmail, reqBodyStr, respBodyStr, statusCode, latency)
+		// Non-blocking enqueue to background audit worker
+		select {
+		case auditLogChan <- auditLogEntry{
+			method:       method,
+			path:         path,
+			ip:           clientIP,
+			userAgent:    userAgent,
+			userEmail:    userEmail,
+			requestBody:  reqBodyStr,
+			responseBody: respBodyStr,
+			statusCode:   statusCode,
+			latency:      latency,
+		}:
+		default:
+			// Buffer full: drop audit log gracefully without impacting live HTTP response latency
+		}
 	}
 }
 

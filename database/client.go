@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"sync"
+	"time"
 
 	"technik-server/prisma/db"
 
@@ -19,6 +20,17 @@ var (
 	mu     sync.Mutex
 )
 
+// configureConnectionPool sets production limits on open connections, idle connections, and lifetime
+func configureConnectionPool(db *sql.DB) {
+	if db == nil {
+		return
+	}
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(10)
+	db.SetConnMaxLifetime(15 * time.Minute)
+	db.SetConnMaxIdleTime(5 * time.Minute)
+}
+
 // InitDB initializes and connects the Prisma Go client and raw PostgreSQL connection
 func InitDB() *db.PrismaClient {
 	mu.Lock()
@@ -28,6 +40,7 @@ func InitDB() *db.PrismaClient {
 	if SQLDB == nil && dbURL != "" {
 		raw, err := sql.Open("postgres", dbURL)
 		if err == nil {
+			configureConnectionPool(raw)
 			SQLDB = raw
 		}
 	}
@@ -57,6 +70,7 @@ func GetSQLDB() *sql.DB {
 		if dbURL != "" {
 			raw, err := sql.Open("postgres", dbURL)
 			if err == nil {
+				configureConnectionPool(raw)
 				SQLDB = raw
 			}
 		}
@@ -87,6 +101,50 @@ func AutoMigrateSchema() {
 		`ALTER TABLE "StudentDetails" ADD COLUMN IF NOT EXISTS "status" TEXT DEFAULT 'Registered & Verified';`,
 		`ALTER TABLE "StudentDetails" ADD COLUMN IF NOT EXISTS "academicYear" INT DEFAULT 2026;`,
 		`ALTER TABLE "OlympiadStudent" ADD COLUMN IF NOT EXISTS "classCategory" TEXT;`,
+		`ALTER TABLE "TechnikPrideNomination" ADD COLUMN IF NOT EXISTS "projectTitle" TEXT;`,
+		`ALTER TABLE "TechnikPrideNomination" ADD COLUMN IF NOT EXISTS "projectDescription" TEXT;`,
+		`ALTER TABLE "TechnikPrideNomination" ADD COLUMN IF NOT EXISTS "studentQuote" TEXT;`,
+		`ALTER TABLE "TechnikPrideNomination" ADD COLUMN IF NOT EXISTS "keyStrengths" TEXT;`,
+		`ALTER TABLE "TechnikPrideNomination" ADD COLUMN IF NOT EXISTS "developmentAreas" TEXT;`,
+		`ALTER TABLE "TechnikPrideNomination" ADD COLUMN IF NOT EXISTS "mentorRemarks" TEXT;`,
+		`ALTER TABLE "TechnikPrideNomination" ADD COLUMN IF NOT EXISTS "projectFile" TEXT;`,
+		`ALTER TABLE "TechnikPrideNomination" ADD COLUMN IF NOT EXISTS "studentPhoto" TEXT;`,
+		`ALTER TABLE "TechnikPrideNomination" ADD COLUMN IF NOT EXISTS "additionalFiles" TEXT;`,
+		`ALTER TABLE "TechnikPrideNomination" ADD COLUMN IF NOT EXISTS "paymentStatus" TEXT DEFAULT 'PENDING';`,
+		`ALTER TABLE "TechnikPrideNomination" ADD COLUMN IF NOT EXISTS "razorpayOrderId" TEXT;`,
+		`ALTER TABLE "TechnikPrideNomination" ADD COLUMN IF NOT EXISTS "razorpayPaymentId" TEXT;`,
+		`ALTER TABLE "TechnikPrideNomination" ADD COLUMN IF NOT EXISTS "razorpaySignature" TEXT;`,
+		`ALTER TABLE "TechnikPrideNomination" ADD COLUMN IF NOT EXISTS "amountPaid" INT DEFAULT 0;`,
+		`ALTER TABLE "TechnikPrideNomination" ADD COLUMN IF NOT EXISTS "paidAt" TIMESTAMPTZ;`,
+		`CREATE TABLE IF NOT EXISTS "StudentAdditionalData" (
+			"id" TEXT PRIMARY KEY,
+			"student_id" TEXT UNIQUE NOT NULL,
+			"student_name" TEXT,
+			"school_id" TEXT,
+			"project_title" TEXT,
+			"project_description" TEXT,
+			"student_quote" TEXT,
+			"key_strengths" TEXT,
+			"development_areas" TEXT,
+			"mentor_remarks" TEXT,
+			"project_file" TEXT,
+			"student_photo" TEXT,
+			"additional_files" TEXT,
+			"achievement_score" DOUBLE PRECISION DEFAULT 4.8,
+			"innovation_score" DOUBLE PRECISION DEFAULT 4.8,
+			"creativity_score" DOUBLE PRECISION DEFAULT 4.3,
+			"communication_score" DOUBLE PRECISION DEFAULT 4.3,
+			"leadership_score" DOUBLE PRECISION DEFAULT 4.0,
+			"social_impact_score" DOUBLE PRECISION DEFAULT 4.3,
+			"payment_status" TEXT DEFAULT 'PENDING',
+			"razorpay_order_id" TEXT,
+			"razorpay_payment_id" TEXT,
+			"razorpay_signature" TEXT,
+			"amount_paid" INT DEFAULT 0,
+			"paid_at" TIMESTAMPTZ,
+			"created_at" TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+			"updated_at" TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+		);`,
 		`CREATE TABLE IF NOT EXISTS "NewsEvents" (
 			"id" TEXT PRIMARY KEY,
 			"type" TEXT NOT NULL,
@@ -107,9 +165,6 @@ func AutoMigrateSchema() {
 		_, _ = rawDB.Exec(q)
 	}
 
-	// Remove any dummy seeded records if existing
-	_, _ = rawDB.Exec(`DELETE FROM "NewsEvents" WHERE id IN ('news-1', 'news-2', 'news-3', 'event-1');`)
-
 	log.Println("PostgreSQL database schema columns & NewsEvents table verified successfully.")
 }
 
@@ -119,14 +174,23 @@ func SeedSuperAdmin() {
 		return
 	}
 	ctx := context.Background()
-	adminEmail := "hari@technikolympiad.com"
+	adminEmail := os.Getenv("ADMIN_INITIAL_EMAIL")
+	if adminEmail == "" {
+		adminEmail = "hari@technikolympiad.com"
+	}
 
 	user, err := Client.User.FindUnique(
 		db.User.Email.Equals(adminEmail),
 	).Exec(ctx)
 
 	if err != nil || user == nil {
-		hashedPass, err := bcrypt.GenerateFromPassword([]byte("Technik#2026"), bcrypt.DefaultCost)
+		adminPass := os.Getenv("ADMIN_INITIAL_PASSWORD")
+		if adminPass == "" {
+			log.Println("Note: ADMIN_INITIAL_PASSWORD not configured. Skipping initial Super Admin seeding.")
+			return
+		}
+
+		hashedPass, err := bcrypt.GenerateFromPassword([]byte(adminPass), bcrypt.DefaultCost)
 		if err != nil {
 			log.Printf("Failed to hash admin password: %v", err)
 			return
@@ -144,7 +208,7 @@ func SeedSuperAdmin() {
 		if err != nil {
 			log.Printf("Error auto-seeding Super Admin user: %v", err)
 		} else {
-			log.Println("Successfully auto-seeded Super Admin user (hari@technikolympiad.com)!")
+			log.Printf("Successfully auto-seeded Super Admin user (%s)!", adminEmail)
 		}
 	}
 }
@@ -169,10 +233,19 @@ func EnsureConnected() error {
 	return err
 }
 
-// DisconnectDB closes the database connection
+// DisconnectDB closes the database connection and raw SQL pool
 func DisconnectDB() {
 	mu.Lock()
 	defer mu.Unlock()
+
+	if SQLDB != nil {
+		if err := SQLDB.Close(); err != nil {
+			log.Printf("Error closing raw SQL DB pool: %v", err)
+		} else {
+			log.Println("Raw SQL DB connection pool closed cleanly.")
+		}
+		SQLDB = nil
+	}
 
 	if Client != nil {
 		if err := Client.Prisma.Disconnect(); err != nil {

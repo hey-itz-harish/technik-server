@@ -94,10 +94,25 @@ func (h *AdminHandler) VerifyAdminOTP(c *gin.Context) {
 	}
 
 	savedOtp, _ := user.Otp()
+	exp, hasExp := user.OtpExpiry()
+	now := time.Now()
+
 	if savedOtp == "" || savedOtp != strings.TrimSpace(req.OTP) {
 		c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: "Invalid OTP code"})
 		return
 	}
+
+	if !hasExp || exp.Before(now) {
+		c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: "OTP code has expired. Please request a new OTP."})
+		return
+	}
+
+	// Invalidate OTP immediately to prevent reuse / replay attacks
+	_, _ = database.Client.User.FindUnique(
+		db.User.ID.Equals(user.ID),
+	).Update(
+		db.User.Otp.Set(""),
+	).Exec(ctx)
 
 	jwtToken, err := middleware.GenerateJWT(user.ID, user.Email, "admin", h.cfg.JWTSecret)
 	if err != nil {
@@ -105,10 +120,16 @@ func (h *AdminHandler) VerifyAdminOTP(c *gin.Context) {
 		return
 	}
 
+	csrfToken := middleware.GenerateCSRFToken(h.cfg.CSRFSecret)
+	c.SetSameSite(http.SameSiteLaxMode)
+	c.SetCookie(middleware.JWTCookieName, jwtToken, 86400, "/", h.cfg.CookieDomain, h.cfg.CookieSecure, true)
+	c.SetCookie(middleware.CSRFCookieName, csrfToken, 86400, "/", h.cfg.CookieDomain, h.cfg.CookieSecure, false)
+
 	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"message": "Admin verification successful",
-		"token":   jwtToken,
+		"success":   true,
+		"message":   "Admin verification successful",
+		"token":     jwtToken,
+		"csrfToken": csrfToken,
 		"user": dto.AdminUserDTO{
 			ID:        user.ID,
 			Name:      user.Name,
@@ -233,6 +254,22 @@ func (h *AdminHandler) UpdatePrideNominationStatus(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, dto.APIError{Success: false, Error: "Failed to update nomination status: " + err.Error()})
 		return
+	}
+
+	// Also sync status into StudentDetails if matching student exists
+	studentName := updated.StudentName
+	var studentWhere []db.StudentDetailsWhereParam
+	studentWhere = append(studentWhere, db.StudentDetails.StudentName.Equals(studentName))
+	if schID, ok := updated.SchoolID(); ok && schID != "" {
+		studentWhere = append(studentWhere, db.StudentDetails.SchoolID.Equals(schID))
+	}
+	matchedStudents, _ := database.Client.StudentDetails.FindMany(studentWhere...).Exec(ctx)
+	for _, st := range matchedStudents {
+		_, _ = database.Client.StudentDetails.FindUnique(
+			db.StudentDetails.ID.Equals(st.ID),
+		).Update(
+			db.StudentDetails.Status.Set(req.Status),
+		).Exec(ctx)
 	}
 
 	c.JSON(http.StatusOK, gin.H{
