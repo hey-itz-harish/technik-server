@@ -208,20 +208,20 @@ func (h *AdminHandler) GetAdminPrideNominations(c *gin.Context) {
 		doc, _ := nom.SupportingDocument()
 
 		results = append(results, gin.H{
-			"id":                  nom.ID,
-			"studentName":         nom.StudentName,
-			"schoolName":          schName,
-			"schoolCity":          schCity,
-			"grade":               nom.Class,
-			"level":               clsCat,
-			"category":            nom.AchievementCategory,
-			"achievementTitle":    nom.AchievementTitle,
-			"submissionDate":      nom.CreatedAt.Format("02 Jan 2006"),
-			"proofFile":           doc,
-			"status":              nomStat,
-			"gender":              nom.Gender,
-			"briefDescription":    nom.BriefDescription,
-			"createdAt":           nom.CreatedAt,
+			"id":               nom.ID,
+			"studentName":      nom.StudentName,
+			"schoolName":       schName,
+			"schoolCity":       schCity,
+			"grade":            nom.Class,
+			"level":            clsCat,
+			"category":         nom.AchievementCategory,
+			"achievementTitle": nom.AchievementTitle,
+			"submissionDate":   nom.CreatedAt.Format("02 Jan 2006"),
+			"proofFile":        doc,
+			"status":           nomStat,
+			"gender":           nom.Gender,
+			"briefDescription": nom.BriefDescription,
+			"createdAt":        nom.CreatedAt,
 		})
 	}
 

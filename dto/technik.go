@@ -6,7 +6,7 @@ import "time"
 type TechnikPrideNominationRequest struct {
 	StudentName         string `json:"studentName" binding:"required"`
 	Class               string `json:"class" binding:"required"`
-	ClassCategory       string `json:"classCategory"`
+	ClassCategory       string `json:"classCategory,omitempty"`
 	Gender              string `json:"gender" binding:"required"`
 	AchievementCategory string `json:"achievementCategory" binding:"required"`
 	AchievementTitle    string `json:"achievementTitle" binding:"required"`
@@ -59,7 +59,7 @@ type SchoolStudentsResponse struct {
 type OlympiadStudentDTO struct {
 	StudentName   string `json:"studentName" binding:"required"`
 	Class         string `json:"class" binding:"required"`
-	ClassCategory string `json:"classCategory"`
+	ClassCategory string `json:"classCategory,omitempty"`
 	Gender        string `json:"gender" binding:"required"`
 	OlympiadTrack string `json:"olympiadTrack" binding:"required"`
 }

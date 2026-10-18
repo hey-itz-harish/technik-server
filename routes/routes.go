@@ -153,11 +153,13 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			}
 		}
 
-		// School Auth routes (public)
+		// School Auth & Profile routes
 		school := api.Group("/school")
 		{
 			school.POST("/register", authHandler.RegisterSchool)
 			school.POST("/login", authHandler.LoginSchool)
+			school.GET("/details", authHandler.GetSchoolDetails)
+			school.GET("/profile", authHandler.GetSchoolDetails)
 		}
 
 		// Public Contact Us & Inquiries route

@@ -28,8 +28,8 @@ func NewTechnikHandler(cfg *config.Config) *TechnikHandler {
 }
 
 // Helper to determine if a class is Junior (Grades 3-5) or Senior (Grades 6-8)
-func isJuniorLevel(classStr, classCat string) bool {
-	combined := strings.ToLower(classStr + " " + classCat)
+func isJuniorLevel(classStr string) bool {
+	combined := strings.ToLower(classStr)
 	if strings.Contains(combined, "jr") ||
 		strings.Contains(combined, "junior") ||
 		strings.Contains(combined, "grade 3") ||
@@ -137,14 +137,8 @@ func (h *TechnikHandler) NominateTechnikPride(c *gin.Context) {
 				schoolID = targetSchoolID
 			}
 
-			normCategory := "Technik Pride Award"
-			if nom.ClassCategory != "" {
-				normCategory = nom.ClassCategory
-			}
-
 			params := []db.TechnikPrideNominationSetParam{
 				db.TechnikPrideNomination.AcademicYear.Set(year),
-				db.TechnikPrideNomination.ClassCategory.Set(normCategory),
 				db.TechnikPrideNomination.SupportingDocument.Set(nom.SupportingDocument),
 				db.TechnikPrideNomination.NominationStatus.Set("Submitted & Under Review"),
 				db.TechnikPrideNomination.AdminStatus.Set("Forwarded to Technik Super Admin"),
@@ -167,7 +161,6 @@ func (h *TechnikHandler) NominateTechnikPride(c *gin.Context) {
 
 			if err == nil && res != nil {
 				schID, _ := res.SchoolID()
-				clsCat, _ := res.ClassCategory()
 				supDoc, _ := res.SupportingDocument()
 				nomStat, _ := res.NominationStatus()
 				admStat, _ := res.AdminStatus()
@@ -178,7 +171,6 @@ func (h *TechnikHandler) NominateTechnikPride(c *gin.Context) {
 					AcademicYear:        res.AcademicYear,
 					StudentName:         res.StudentName,
 					Class:               res.Class,
-					ClassCategory:       clsCat,
 					Gender:              res.Gender,
 					AchievementCategory: res.AchievementCategory,
 					AchievementTitle:    res.AchievementTitle,
@@ -195,7 +187,6 @@ func (h *TechnikHandler) NominateTechnikPride(c *gin.Context) {
 				stParams = append(stParams,
 					db.StudentDetails.Gender.Set(nom.Gender),
 					db.StudentDetails.Category.Set("Technik Pride Award"),
-					db.StudentDetails.ClassCategory.Set(normCategory),
 					db.StudentDetails.Status.Set("Nomination Received"),
 					db.StudentDetails.AcademicYear.Set(year),
 				)
@@ -255,14 +246,8 @@ func (h *TechnikHandler) NominateTechnikPride(c *gin.Context) {
 		return
 	}
 
-	normCategory := "Technik Pride Award"
-	if singleReq.ClassCategory != "" {
-		normCategory = singleReq.ClassCategory
-	}
-
 	params := []db.TechnikPrideNominationSetParam{
 		db.TechnikPrideNomination.AcademicYear.Set(year),
-		db.TechnikPrideNomination.ClassCategory.Set(normCategory),
 		db.TechnikPrideNomination.SupportingDocument.Set(singleReq.SupportingDocument),
 		db.TechnikPrideNomination.NominationStatus.Set("Submitted & Under Review"),
 		db.TechnikPrideNomination.AdminStatus.Set("Forwarded to Technik Super Admin"),
@@ -290,7 +275,6 @@ func (h *TechnikHandler) NominateTechnikPride(c *gin.Context) {
 	}
 
 	schID, _ := res.SchoolID()
-	clsCat, _ := res.ClassCategory()
 	supDoc, _ := res.SupportingDocument()
 	nomStat, _ := res.NominationStatus()
 	admStat, _ := res.AdminStatus()
@@ -300,7 +284,6 @@ func (h *TechnikHandler) NominateTechnikPride(c *gin.Context) {
 	stParams = append(stParams,
 		db.StudentDetails.Gender.Set(singleReq.Gender),
 		db.StudentDetails.Category.Set("Technik Pride Award"),
-		db.StudentDetails.ClassCategory.Set(normCategory),
 		db.StudentDetails.Status.Set("Nomination Received"),
 		db.StudentDetails.AcademicYear.Set(year),
 	)
@@ -325,7 +308,6 @@ func (h *TechnikHandler) NominateTechnikPride(c *gin.Context) {
 				AcademicYear:        res.AcademicYear,
 				StudentName:         res.StudentName,
 				Class:               res.Class,
-				ClassCategory:       clsCat,
 				Gender:              res.Gender,
 				AchievementCategory: res.AchievementCategory,
 				AchievementTitle:    res.AchievementTitle,
@@ -515,41 +497,24 @@ func (h *TechnikHandler) GetSchoolStudents(c *gin.Context) {
 		for _, reg := range olymRegistrations {
 			schID, _ := reg.SchoolID()
 			for _, st := range reg.Students() {
-				clsCat, _ := st.ClassCategory()
-				if clsCat == "" {
-					if isJuniorLevel(st.Class, "") {
-						clsCat = "Grade 3 to 5 (Jr Level)"
-					} else {
-						clsCat = "Grade 6 to 8 (Senior Level)"
-					}
-				}
-
 				category := st.OlympiadTrack
 				if category == "" {
 					category = "Robotics Olympiad"
 				}
 
 				displayGrade := st.Class
-				if clsCat != "" && !strings.Contains(displayGrade, "(") {
-					if strings.Contains(clsCat, "Jr") {
-						displayGrade = fmt.Sprintf("%s (Jr Level)", st.Class)
-					} else if strings.Contains(clsCat, "Senior") || strings.Contains(clsCat, "Sr") {
-						displayGrade = fmt.Sprintf("%s (Sr Level)", st.Class)
-					}
-				}
 
 				combined = append(combined, dto.StudentResponse{
-					ID:            st.ID,
-					StudentName:   st.StudentName,
-					Grade:         displayGrade,
-					ClassCategory: clsCat,
-					Category:      category,
-					Gender:        st.Gender,
-					Status:        "Registered & Verified",
-					AcademicYear:  reg.AcademicYear,
-					SchoolID:      schID,
-					CreatedAt:     st.CreatedAt,
-					UpdatedAt:     st.UpdatedAt,
+					ID:           st.ID,
+					StudentName:  st.StudentName,
+					Grade:        displayGrade,
+					Category:     category,
+					Gender:       st.Gender,
+					Status:       "Registered & Verified",
+					AcademicYear: reg.AcademicYear,
+					SchoolID:     schID,
+					CreatedAt:    st.CreatedAt,
+					UpdatedAt:    st.UpdatedAt,
 				})
 			}
 		}
@@ -574,7 +539,6 @@ func (h *TechnikHandler) GetSchoolStudents(c *gin.Context) {
 			if category == "" {
 				category = "Robotics Olympiad"
 			}
-			clsCat, _ := st.ClassCategory()
 			status, _ := st.Status()
 			if status == "" {
 				status = "Registered & Verified"
@@ -585,26 +549,18 @@ func (h *TechnikHandler) GetSchoolStudents(c *gin.Context) {
 			}
 
 			displayGrade := st.Grade
-			if clsCat != "" && !strings.Contains(displayGrade, "(") {
-				if strings.Contains(clsCat, "Jr") {
-					displayGrade = fmt.Sprintf("%s (Jr Level)", st.Grade)
-				} else if strings.Contains(clsCat, "Senior") || strings.Contains(clsCat, "Sr") {
-					displayGrade = fmt.Sprintf("%s (Sr Level)", st.Grade)
-				}
-			}
 
 			combined = append(combined, dto.StudentResponse{
-				ID:            st.ID,
-				StudentName:   st.StudentName,
-				Grade:         displayGrade,
-				ClassCategory: clsCat,
-				Category:      category,
-				Gender:        gender,
-				Status:        status,
-				AcademicYear:  acadYear,
-				SchoolID:      schID,
-				CreatedAt:     st.CreatedAt,
-				UpdatedAt:     st.UpdatedAt,
+				ID:           st.ID,
+				StudentName:  st.StudentName,
+				Grade:        displayGrade,
+				Category:     category,
+				Gender:       gender,
+				Status:       status,
+				AcademicYear: acadYear,
+				SchoolID:     schID,
+				CreatedAt:    st.CreatedAt,
+				UpdatedAt:    st.UpdatedAt,
 			})
 		}
 	}
@@ -634,11 +590,11 @@ func (h *TechnikHandler) GetSchoolStudents(c *gin.Context) {
 		// Grade Level Filter
 		if gradeLevel != "" && gradeLevel != "All" {
 			if gradeLevel == "Jr Level" || gradeLevel == "Junior Level" {
-				if !strings.Contains(st.Grade, "Jr") && !isJuniorLevel(st.Grade, st.ClassCategory) {
+				if !strings.Contains(st.Grade, "Jr") && !isJuniorLevel(st.Grade) {
 					continue
 				}
 			} else if gradeLevel == "Sr Level" || gradeLevel == "Senior Level" {
-				if !strings.Contains(st.Grade, "Sr") && isJuniorLevel(st.Grade, st.ClassCategory) {
+				if !strings.Contains(st.Grade, "Sr") && isJuniorLevel(st.Grade) {
 					continue
 				}
 			}
@@ -715,18 +671,6 @@ func (h *TechnikHandler) RegisterOlympiad(c *gin.Context) {
 	// Create student entries in array and sync into StudentDetails
 	var studentResponses []dto.OlympiadStudentResponse
 	for _, st := range req.Students {
-		normCategory := "Grade 6 to 8 (Senior Level)"
-		if isJuniorLevel(st.Class, st.ClassCategory) {
-			normCategory = "Grade 3 to 5 (Jr Level)"
-		}
-		if st.ClassCategory != "" {
-			normCategory = st.ClassCategory
-		}
-
-		stParams := []db.OlympiadStudentSetParam{
-			db.OlympiadStudent.ClassCategory.Set(normCategory),
-		}
-
 		stRes, err := database.Client.OlympiadStudent.CreateOne(
 			db.OlympiadStudent.OlympiadRegistration.Link(
 				db.OlympiadRegistration.ID.Equals(registration.ID),
@@ -735,16 +679,13 @@ func (h *TechnikHandler) RegisterOlympiad(c *gin.Context) {
 			db.OlympiadStudent.Class.Set(st.Class),
 			db.OlympiadStudent.Gender.Set(st.Gender),
 			db.OlympiadStudent.OlympiadTrack.Set(st.OlympiadTrack),
-			stParams...,
 		).Exec(ctx)
 
 		if err == nil && stRes != nil {
-			cat, _ := stRes.ClassCategory()
 			studentResponses = append(studentResponses, dto.OlympiadStudentResponse{
 				ID:            stRes.ID,
 				StudentName:   stRes.StudentName,
 				Class:         stRes.Class,
-				ClassCategory: cat,
 				Gender:        stRes.Gender,
 				OlympiadTrack: stRes.OlympiadTrack,
 				CreatedAt:     stRes.CreatedAt,
@@ -755,7 +696,6 @@ func (h *TechnikHandler) RegisterOlympiad(c *gin.Context) {
 			sdParams = append(sdParams,
 				db.StudentDetails.Gender.Set(st.Gender),
 				db.StudentDetails.Category.Set(st.OlympiadTrack),
-				db.StudentDetails.ClassCategory.Set(normCategory),
 				db.StudentDetails.Status.Set("Registered & Verified"),
 				db.StudentDetails.AcademicYear.Set(year),
 			)
