@@ -2,8 +2,8 @@ package handlers
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
-	"math/rand"
 	"net/http"
 	"strings"
 	"time"
@@ -55,8 +55,11 @@ func (h *AdminHandler) LoginAdmin(c *gin.Context) {
 		return
 	}
 
-	otpCode := fmt.Sprintf("%06d", rand.Intn(900000)+100000)
-	otpExpiry := time.Now().Add(15 * time.Minute)
+	otpBytes := make([]byte, 3)
+	_, _ = rand.Read(otpBytes)
+	otpNum := (int(otpBytes[0])<<16 | int(otpBytes[1])<<8 | int(otpBytes[2])) % 1000000
+	otpCode := fmt.Sprintf("%06d", otpNum)
+	otpExpiry := time.Now().Add(10 * time.Minute)
 
 	_, _ = database.Client.User.FindUnique(
 		db.User.ID.Equals(user.ID),
@@ -98,6 +101,19 @@ func (h *AdminHandler) VerifyAdminOTP(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: "Invalid OTP code"})
 		return
 	}
+
+	exp, ok := user.OtpExpiry()
+	if !ok || exp.Before(time.Now()) {
+		c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: "Admin OTP code has expired. Please log in again."})
+		return
+	}
+
+	// Invalidate OTP immediately upon successful verification (replay protection)
+	_, _ = database.Client.User.FindUnique(
+		db.User.ID.Equals(user.ID),
+	).Update(
+		db.User.Otp.Set(""),
+	).Exec(ctx)
 
 	jwtToken, err := middleware.GenerateJWT(user.ID, user.Email, "admin", h.cfg.JWTSecret)
 	if err != nil {

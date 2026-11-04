@@ -3,7 +3,6 @@ package middleware
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"io"
 	"net/http"
 	"regexp"
@@ -32,8 +31,8 @@ func sanitizeBody(bodyStr string) string {
 	if bodyStr == "" {
 		return ""
 	}
-	// Simple regex or string replacement to mask sensitive parameters like passwords
-	re := regexp.MustCompile(`"(password|token|otp)":\s*"[^"]*"`)
+	// Mask sensitive parameters like passwords, tokens, secrets, and OTPs
+	re := regexp.MustCompile(`"(password|token|otp|secret|actToken|code|apiKey|msAuthSecret|jwtSecret)":\s*"[^"]*"`)
 	return re.ReplaceAllString(bodyStr, `"$1": "***masked***"`)
 }
 
@@ -127,12 +126,11 @@ func GlobalErrorHandlerMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		defer func() {
 			if err := recover(); err != nil {
-				errMsg := fmt.Sprintf("Internal Server Error: %v", err)
-				logger.Error("PANIC RECOVERED: %s", errMsg)
+				logger.Error("PANIC RECOVERED: %v", err)
 
 				c.JSON(http.StatusInternalServerError, dto.APIError{
 					Success: false,
-					Error:   errMsg,
+					Error:   "An unexpected internal error occurred. Please try again later.",
 				})
 				c.Abort()
 			}

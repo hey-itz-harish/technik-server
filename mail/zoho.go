@@ -3,8 +3,10 @@ package mail
 import (
 	"crypto/tls"
 	"fmt"
+	"html"
 	"net"
 	"net/smtp"
+	"strings"
 	"time"
 
 	"technik-server/config"
@@ -25,6 +27,7 @@ func NewZohoMailService(cfg *config.Config) *ZohoMailService {
 
 // SendActivationEmail sends an account activation link via Resend API (HTTPS) or Zoho SMTP.
 func (z *ZohoMailService) SendActivationEmail(toEmail, recipientName, activationLink, resendLink string) error {
+	safeName := html.EscapeString(recipientName)
 	htmlBody := fmt.Sprintf(`
 <!DOCTYPE html>
 <html>
@@ -61,7 +64,7 @@ func (z *ZohoMailService) SendActivationEmail(toEmail, recipientName, activation
   </div>
 </body>
 </html>
-`, recipientName, activationLink, activationLink, activationLink, resendLink)
+`, safeName, activationLink, activationLink, activationLink, resendLink)
 
 	logger.Info("[ACCOUNT ACTIVATION LINK] To: %s (%s) | Link: %s", toEmail, recipientName, activationLink)
 
@@ -92,6 +95,7 @@ func (z *ZohoMailService) SendActivationEmail(toEmail, recipientName, activation
 
 // SendOTPEmail sends a styled HTML OTP email via Resend API (HTTPS) or Zoho Mail SMTP
 func (z *ZohoMailService) SendOTPEmail(toEmail, recipientName, otpCode string) error {
+	safeName := html.EscapeString(recipientName)
 	htmlBody := fmt.Sprintf(`
 <!DOCTYPE html>
 <html>
@@ -118,7 +122,7 @@ func (z *ZohoMailService) SendOTPEmail(toEmail, recipientName, otpCode string) e
   </div>
 </body>
 </html>
-`, recipientName, otpCode)
+`, safeName, otpCode)
 
 	// 1. Primary: Use Resend HTTPS API if configured (Zero blocking on Railway)
 	if z.cfg.ResendApiKey != "" {
@@ -157,7 +161,17 @@ func (z *ZohoMailService) SendContactEnquiryEmail(name, email, phone, subject, m
 		phoneText = "Not provided"
 	}
 
-	mailSubject := fmt.Sprintf("Website Contact: %s - %s", subject, name)
+	cleanSubject := strings.ReplaceAll(strings.ReplaceAll(subject, "\r", ""), "\n", "")
+	cleanName := strings.ReplaceAll(strings.ReplaceAll(name, "\r", ""), "\n", "")
+	cleanEmail := strings.ReplaceAll(strings.ReplaceAll(email, "\r", ""), "\n", "")
+
+	mailSubject := fmt.Sprintf("Website Contact: %s - %s", cleanSubject, cleanName)
+
+	safeSubject := html.EscapeString(cleanSubject)
+	safeName := html.EscapeString(cleanName)
+	safeEmail := html.EscapeString(cleanEmail)
+	safePhone := html.EscapeString(phoneText)
+	safeMessage := html.EscapeString(message)
 
 	htmlBody := fmt.Sprintf(`
 <!DOCTYPE html>
@@ -202,9 +216,9 @@ func (z *ZohoMailService) SendContactEnquiryEmail(name, email, phone, subject, m
   </div>
 </body>
 </html>
-`, subject, name, email, email, phoneText, message)
+`, safeSubject, safeName, safeEmail, safeEmail, safePhone, safeMessage)
 
-	logger.Info("[CONTACT INQUIRY] From: %s (%s) | Subject: %s", email, name, subject)
+	logger.Info("[CONTACT INQUIRY] From: %s (%s) | Subject: %s", cleanEmail, cleanName, cleanSubject)
 
 	// 1. Primary: Use Resend HTTPS API if configured (Zero blocking on Railway)
 	if z.cfg.ResendApiKey != "" {
@@ -215,7 +229,7 @@ func (z *ZohoMailService) SendContactEnquiryEmail(name, email, phone, subject, m
 	if z.cfg.ZohoUser == "" || z.cfg.ZohoPass == "" {
 		logger.Error("Neither RESEND_API_KEY nor ZOHO_SMTP credentials are configured in .env")
 		logger.Info("--------------------------------------------------")
-		logger.Info("[DEV MOCK CONTACT MESSAGE] To: %s | From: %s (%s) | Subject: %s | Message: %s", recipient, email, name, subject, message)
+		logger.Info("[DEV MOCK CONTACT MESSAGE] To: %s | From: %s (%s) | Subject: %s | Message: %s", recipient, cleanEmail, cleanName, cleanSubject, message)
 		logger.Info("--------------------------------------------------")
 		return nil
 	}
@@ -225,10 +239,13 @@ func (z *ZohoMailService) SendContactEnquiryEmail(name, email, phone, subject, m
 		from = z.cfg.ZohoUser
 	}
 
-	subjectLine := fmt.Sprintf("Subject: %s\n", mailSubject)
-	mime := "MIME-version: 1.0;\nContent-Type: text/html; charset=\"UTF-8\";\nFrom: Technik Olympiad <" + from + ">\nTo: " + recipient + "\nReply-To: " + email + "\n\n"
+	cleanFrom := strings.ReplaceAll(strings.ReplaceAll(from, "\r", ""), "\n", "")
+	cleanRecipient := strings.ReplaceAll(strings.ReplaceAll(recipient, "\r", ""), "\n", "")
 
-	return z.sendRawMail(recipient, from, subjectLine+mime+htmlBody)
+	subjectLine := fmt.Sprintf("Subject: %s\n", cleanSubject)
+	mime := "MIME-version: 1.0;\nContent-Type: text/html; charset=\"UTF-8\";\nFrom: Technik Olympiad <" + cleanFrom + ">\nTo: " + cleanRecipient + "\nReply-To: " + cleanEmail + "\n\n"
+
+	return z.sendRawMail(cleanRecipient, cleanFrom, subjectLine+mime+htmlBody)
 }
 
 func (z *ZohoMailService) sendRawMail(toEmail, from, rawBody string) error {

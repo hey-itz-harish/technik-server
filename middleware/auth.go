@@ -113,3 +113,19 @@ func AuthMiddleware(cfg *config.Config) gin.HandlerFunc {
 		c.Next()
 	}
 }
+
+// RequireAdminRole ensures only users with role "admin" can access the endpoint
+func RequireAdminRole() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		roleVal, exists := c.Get("userRole")
+		if !exists || roleVal != "admin" {
+			c.JSON(http.StatusForbidden, dto.APIError{
+				Success: false,
+				Error:   "Access denied. Administrator privileges required.",
+			})
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+}

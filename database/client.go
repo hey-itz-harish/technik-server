@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"sync"
+	"time"
 
 	"technik-server/prisma/db"
 
@@ -15,8 +16,50 @@ import (
 
 var (
 	Client *db.PrismaClient
+	RawDB  *sql.DB
 	mu     sync.Mutex
 )
+
+// GetRawDB returns a shared, thread-safe connection to the PostgreSQL database if reachable
+func GetRawDB() (*sql.DB, error) {
+	mu.Lock()
+	defer mu.Unlock()
+
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		return nil, sql.ErrConnDone
+	}
+
+	if RawDB != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
+		defer cancel()
+		if err := RawDB.PingContext(ctx); err == nil {
+			return RawDB, nil
+		}
+		_ = RawDB.Close()
+		RawDB = nil
+		return nil, sql.ErrConnDone
+	}
+
+	dbConn, err := sql.Open("postgres", dbURL)
+	if err != nil {
+		return nil, err
+	}
+
+	dbConn.SetMaxOpenConns(25)
+	dbConn.SetMaxIdleConns(5)
+	dbConn.SetConnMaxLifetime(5 * time.Minute)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
+	defer cancel()
+	if err := dbConn.PingContext(ctx); err != nil {
+		_ = dbConn.Close()
+		return nil, err
+	}
+
+	RawDB = dbConn
+	return RawDB, nil
+}
 
 // InitDB initializes and connects the Prisma Go client to PostgreSQL
 func InitDB() *db.PrismaClient {
@@ -41,6 +84,7 @@ func InitDB() *db.PrismaClient {
 
 // AutoMigrateSchema ensures all required columns exist on remote PostgreSQL tables
 func AutoMigrateSchema() {
+	EnsureOlympiadTables()
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
 		return
@@ -76,33 +120,58 @@ func SeedSuperAdmin() {
 		return
 	}
 	ctx := context.Background()
-	adminEmail := "hari@technikolympiad.com"
 
+	adminEmail := os.Getenv("INITIAL_ADMIN_EMAIL")
+	if adminEmail == "" {
+		adminEmail = os.Getenv("ADMIN_EMAIL")
+	}
+	if adminEmail == "" {
+		adminEmail = "hari@technikolympiad.com"
+	}
+
+	adminPassword := os.Getenv("INITIAL_ADMIN_PASSWORD")
+	if adminPassword == "" {
+		adminPassword = os.Getenv("ADMIN_PASSWORD")
+	}
+
+	// If admin user already exists, do nothing
 	user, err := Client.User.FindUnique(
 		db.User.Email.Equals(adminEmail),
 	).Exec(ctx)
 
-	if err != nil || user == nil {
-		hashedPass, err := bcrypt.GenerateFromPassword([]byte("Technik#2026"), bcrypt.DefaultCost)
-		if err != nil {
-			log.Printf("Failed to hash admin password: %v", err)
+	if err == nil && user != nil {
+		return
+	}
+
+	// Avoid insecure default seeding in production if password is not configured
+	if adminPassword == "" {
+		if os.Getenv("GIN_MODE") == "release" {
+			log.Println("Notice: INITIAL_ADMIN_PASSWORD not set. Skipping automatic admin seeding in production.")
 			return
 		}
+		adminPassword = "TechnikPass#2026"
+		log.Println("Notice: Auto-seeding initial admin using development password. Please set INITIAL_ADMIN_PASSWORD.")
+	}
 
-		_, err = Client.User.CreateOne(
-			db.User.Name.Set("Super Admin"),
-			db.User.Email.Set(adminEmail),
-			db.User.Password.Set(string(hashedPass)),
-			db.User.Role.Set(db.RoleAdmin),
-			db.User.IsActivated.Set(true),
-			db.User.IsVerified.Set(true),
-		).Exec(ctx)
+	hashedPass, err := bcrypt.GenerateFromPassword([]byte(adminPassword), bcrypt.DefaultCost)
+	if err != nil {
+		log.Printf("Failed to hash admin password: %v", err)
+		return
+	}
 
-		if err != nil {
-			log.Printf("Error auto-seeding Super Admin user: %v", err)
-		} else {
-			log.Println("Successfully auto-seeded Super Admin user (hari@technikolympiad.com)!")
-		}
+	_, err = Client.User.CreateOne(
+		db.User.Name.Set("Super Admin"),
+		db.User.Email.Set(adminEmail),
+		db.User.Password.Set(string(hashedPass)),
+		db.User.Role.Set(db.RoleAdmin),
+		db.User.IsActivated.Set(true),
+		db.User.IsVerified.Set(true),
+	).Exec(ctx)
+
+	if err != nil {
+		log.Printf("Error auto-seeding Super Admin user: %v", err)
+	} else {
+		log.Printf("Successfully initialized Super Admin user (%s)!", adminEmail)
 	}
 }
 

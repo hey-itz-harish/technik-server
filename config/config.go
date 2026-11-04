@@ -35,6 +35,17 @@ func LoadConfig() *Config {
 	dbURL := getEnv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/technik_db?schema=public")
 	jwtSecret := getEnv("JWT_SECRET", "default_jwt_secret_change_me_2026")
 	csrfSecret := getEnv("CSRF_SECRET", "default_csrf_secret_change_me_2026")
+
+	if jwtSecret == "default_jwt_secret_change_me_2026" {
+		if os.Getenv("GIN_MODE") == "release" {
+			log.Fatal("SECURITY FATAL: JWT_SECRET must be explicitly set to a strong secret in production (.env). Exiting.")
+		} else {
+			log.Println("SECURITY WARNING: JWT_SECRET is using default development secret. Please configure JWT_SECRET for production.")
+		}
+	}
+	if csrfSecret == "default_csrf_secret_change_me_2026" && os.Getenv("GIN_MODE") == "release" {
+		log.Fatal("SECURITY FATAL: CSRF_SECRET must be explicitly set to a strong secret in production (.env). Exiting.")
+	}
 	cookieDomain := getEnv("COOKIE_DOMAIN", "localhost")
 	cookieSecure := getEnv("COOKIE_SECURE", "false") == "true"
 	frontendRaw := getEnv("FRONTEND_URL", getEnv("FRONTEND", "https://www.technikolympiad.com"))

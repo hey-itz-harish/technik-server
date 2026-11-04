@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
+	"html"
 	"net/http"
 	"strings"
 	"time"
@@ -319,6 +320,8 @@ func resendResultHTML(success bool, message string) string {
 		title = "Couldn't Resend Activation Email"
 		color = "#dc2626"
 	}
+	escapedTitle := html.EscapeString(title)
+	escapedMessage := html.EscapeString(message)
 	return fmt.Sprintf(`<!DOCTYPE html>
 <html>
 <head><meta charset="UTF-8"><title>%s</title></head>
@@ -328,7 +331,7 @@ func resendResultHTML(success bool, message string) string {
     <p style="color: #475569; font-size: 14px; line-height: 1.6;">%s</p>
   </div>
 </body>
-</html>`, title, color, title, message)
+</html>`, escapedTitle, color, escapedTitle, escapedMessage)
 }
 
 // ResendActivationByToken is hit directly from the "Resend Activation Link"

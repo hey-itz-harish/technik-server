@@ -46,7 +46,7 @@ func isJuniorLevel(classStr, classCat string) bool {
 	return false
 }
 
-// UploadDocument handles multipart file upload for nominations / certificates
+// UploadDocument handles multipart file upload for nominations / certificates with strict validation
 func (h *TechnikHandler) UploadDocument(c *gin.Context) {
 	file, err := c.FormFile("file")
 	if err != nil {
@@ -54,9 +54,59 @@ func (h *TechnikHandler) UploadDocument(c *gin.Context) {
 		return
 	}
 
-	// Create directory if not exists
+	// 1. Enforce max file size: 10 MB
+	const maxUploadSize = 10 * 1024 * 1024
+	if file.Size > maxUploadSize {
+		c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: "Uploaded file exceeds maximum limit of 10MB"})
+		return
+	}
+
+	// 2. Validate file extension against allowed document/image types
+	ext := strings.ToLower(filepath.Ext(file.Filename))
+	allowedExtensions := map[string]bool{
+		".pdf":  true,
+		".jpg":  true,
+		".jpeg": true,
+		".png":  true,
+		".webp": true,
+	}
+	if !allowedExtensions[ext] {
+		c.JSON(http.StatusBadRequest, dto.APIError{
+			Success: false,
+			Error:   "Invalid file extension. Only PDF, JPG, PNG, and WEBP documents are allowed.",
+		})
+		return
+	}
+
+	// 3. Inspect magic bytes / MIME type to prevent disguised scripts
+	src, err := file.Open()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.APIError{Success: false, Error: "Failed to open uploaded file for validation"})
+		return
+	}
+	defer src.Close()
+
+	buffer := make([]byte, 512)
+	n, _ := src.Read(buffer)
+	mimeType := http.DetectContentType(buffer[:n])
+
+	allowedMIMEs := map[string]bool{
+		"application/pdf": true,
+		"image/jpeg":      true,
+		"image/png":       true,
+		"image/webp":      true,
+	}
+	if !allowedMIMEs[mimeType] {
+		c.JSON(http.StatusBadRequest, dto.APIError{
+			Success: false,
+			Error:   "Invalid file format. File content does not match allowed document/image formats.",
+		})
+		return
+	}
+
+	// 4. Create directory if not exists with restricted permissions
 	uploadDir := "./uploads/nominations"
-	if err := os.MkdirAll(uploadDir, os.ModePerm); err != nil {
+	if err := os.MkdirAll(uploadDir, 0755); err != nil {
 		c.JSON(http.StatusInternalServerError, dto.APIError{Success: false, Error: "Failed to create upload directory"})
 		return
 	}
@@ -104,9 +154,15 @@ func (h *TechnikHandler) NominateTechnikPride(c *gin.Context) {
 			year = currentYear
 		}
 
+		userRole, _ := c.Get("userRole")
 		targetSchoolID := batchReq.SchoolID
-		if targetSchoolID == "" {
+		if userRole == "school" || targetSchoolID == "" {
 			targetSchoolID = sessionSchoolID
+		}
+
+		if targetSchoolID == "" {
+			c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: "School identification is required"})
+			return
 		}
 
 		// Fetch existing nominations for this school and year to check quota
@@ -260,9 +316,15 @@ func (h *TechnikHandler) NominateTechnikPride(c *gin.Context) {
 		year = currentYear
 	}
 
+	userRole, _ := c.Get("userRole")
 	targetSchoolID := singleReq.SchoolID
-	if targetSchoolID == "" {
+	if userRole == "school" || targetSchoolID == "" {
 		targetSchoolID = sessionSchoolID
+	}
+
+	if targetSchoolID == "" {
+		c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: "School identification is required"})
+		return
 	}
 
 	// Check existing nominations for this school and year
@@ -396,7 +458,10 @@ func (h *TechnikHandler) GetTechnikPrideNominations(c *gin.Context) {
 	schoolID := c.Query("schoolId")
 	search := strings.ToLower(strings.TrimSpace(c.Query("search")))
 
-	if schoolID == "" {
+	userRole, _ := c.Get("userRole")
+	if userRole == "school" {
+		schoolID = c.GetString("userId")
+	} else if schoolID == "" {
 		if val, exists := c.Get("userId"); exists {
 			schoolID = val.(string)
 		}
@@ -482,11 +547,22 @@ func (h *TechnikHandler) GetTechnikPrideNominations(c *gin.Context) {
 func (h *TechnikHandler) GetSchoolStudents(c *gin.Context) {
 	_ = database.EnsureConnected()
 	ctx := context.Background()
-	schoolID := c.Query("schoolId")
-	if schoolID == "" {
-		if val, exists := c.Get("userId"); exists {
-			schoolID = val.(string)
+	var schoolID string
+	userRole, _ := c.Get("userRole")
+	if userRole == "school" {
+		schoolID = c.GetString("userId")
+	} else {
+		schoolID = c.Query("schoolId")
+		if schoolID == "" {
+			if val, exists := c.Get("userId"); exists {
+				schoolID = val.(string)
+			}
 		}
+	}
+
+	if schoolID == "" {
+		c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: "schoolId parameter is required"})
+		return
 	}
 
 	search := strings.ToLower(strings.TrimSpace(c.Query("search")))
@@ -744,11 +820,17 @@ func (h *TechnikHandler) RegisterOlympiad(c *gin.Context) {
 		year = currentYear
 	}
 
+	userRole, _ := c.Get("userRole")
 	targetSchoolID := req.SchoolID
-	if targetSchoolID == "" {
+	if userRole == "school" || targetSchoolID == "" {
 		if val, exists := c.Get("userId"); exists {
 			targetSchoolID = val.(string)
 		}
+	}
+
+	if targetSchoolID == "" {
+		c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: "School identification is required"})
+		return
 	}
 
 	// Create Olympiad Registration Batch Header
@@ -851,10 +933,18 @@ func (h *TechnikHandler) GetOlympiadRegistrations(c *gin.Context) {
 	schoolID := c.Query("schoolId")
 	yearStr := c.Query("year")
 
-	if schoolID == "" {
+	userRole, _ := c.Get("userRole")
+	if userRole == "school" {
+		schoolID = c.GetString("userId")
+	} else if schoolID == "" {
 		if val, exists := c.Get("userId"); exists {
 			schoolID = val.(string)
 		}
+	}
+
+	if schoolID == "" && userRole != "admin" {
+		c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: "schoolId parameter is required"})
+		return
 	}
 
 	year := time.Now().Year()
