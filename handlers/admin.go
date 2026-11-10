@@ -97,18 +97,20 @@ func (h *AdminHandler) VerifyAdminOTP(c *gin.Context) {
 	}
 
 	savedOtp, _ := user.Otp()
+	exp, hasExp := user.OtpExpiry()
+	now := time.Now()
+
 	if savedOtp == "" || savedOtp != strings.TrimSpace(req.OTP) {
 		c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: "Invalid OTP code"})
 		return
 	}
 
-	exp, ok := user.OtpExpiry()
-	if !ok || exp.Before(time.Now()) {
+	if !hasExp || exp.Before(now) {
 		c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: "Admin OTP code has expired. Please log in again."})
 		return
 	}
 
-	// Invalidate OTP immediately upon successful verification (replay protection)
+	// Invalidate OTP immediately to prevent reuse / replay attacks
 	_, _ = database.Client.User.FindUnique(
 		db.User.ID.Equals(user.ID),
 	).Update(
@@ -121,10 +123,16 @@ func (h *AdminHandler) VerifyAdminOTP(c *gin.Context) {
 		return
 	}
 
+	csrfToken := middleware.GenerateCSRFToken(h.cfg.CSRFSecret)
+	c.SetSameSite(http.SameSiteLaxMode)
+	c.SetCookie(middleware.JWTCookieName, jwtToken, 86400, "/", h.cfg.CookieDomain, h.cfg.CookieSecure, true)
+	c.SetCookie(middleware.CSRFCookieName, csrfToken, 86400, "/", h.cfg.CookieDomain, h.cfg.CookieSecure, false)
+
 	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"message": "Admin verification successful",
-		"token":   jwtToken,
+		"success":   true,
+		"message":   "Admin verification successful",
+		"token":     jwtToken,
+		"csrfToken": csrfToken,
 		"user": dto.AdminUserDTO{
 			ID:        user.ID,
 			Name:      user.Name,
@@ -197,30 +205,26 @@ func (h *AdminHandler) GetAdminPrideNominations(c *gin.Context) {
 
 		clsCat, _ := nom.ClassCategory()
 		if clsCat == "" {
-			if isJuniorLevel(nom.Class, "") {
-				clsCat = "Junior Level"
-			} else {
-				clsCat = "Senior Level"
-			}
+			clsCat = "Technik Pride Award"
 		}
 
 		doc, _ := nom.SupportingDocument()
 
 		results = append(results, gin.H{
-			"id":                  nom.ID,
-			"studentName":         nom.StudentName,
-			"schoolName":          schName,
-			"schoolCity":          schCity,
-			"grade":               nom.Class,
-			"level":               clsCat,
-			"category":            nom.AchievementCategory,
-			"achievementTitle":    nom.AchievementTitle,
-			"submissionDate":      nom.CreatedAt.Format("02 Jan 2006"),
-			"proofFile":           doc,
-			"status":              nomStat,
-			"gender":              nom.Gender,
-			"briefDescription":    nom.BriefDescription,
-			"createdAt":           nom.CreatedAt,
+			"id":               nom.ID,
+			"studentName":      nom.StudentName,
+			"schoolName":       schName,
+			"schoolCity":       schCity,
+			"grade":            nom.Class,
+			"level":            clsCat,
+			"category":         nom.AchievementCategory,
+			"achievementTitle": nom.AchievementTitle,
+			"submissionDate":   nom.CreatedAt.Format("02 Jan 2006"),
+			"proofFile":        doc,
+			"status":           nomStat,
+			"gender":           nom.Gender,
+			"briefDescription": nom.BriefDescription,
+			"createdAt":        nom.CreatedAt,
 		})
 	}
 
@@ -253,6 +257,22 @@ func (h *AdminHandler) UpdatePrideNominationStatus(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, dto.APIError{Success: false, Error: "Failed to update nomination status: " + err.Error()})
 		return
+	}
+
+	// Also sync status into StudentDetails if matching student exists
+	studentName := updated.StudentName
+	var studentWhere []db.StudentDetailsWhereParam
+	studentWhere = append(studentWhere, db.StudentDetails.StudentName.Equals(studentName))
+	if schID, ok := updated.SchoolID(); ok && schID != "" {
+		studentWhere = append(studentWhere, db.StudentDetails.SchoolID.Equals(schID))
+	}
+	matchedStudents, _ := database.Client.StudentDetails.FindMany(studentWhere...).Exec(ctx)
+	for _, st := range matchedStudents {
+		_, _ = database.Client.StudentDetails.FindUnique(
+			db.StudentDetails.ID.Equals(st.ID),
+		).Update(
+			db.StudentDetails.Status.Set(req.Status),
+		).Exec(ctx)
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -395,9 +415,12 @@ func (h *AdminHandler) CreateAdminUser(c *gin.Context) {
 		return
 	}
 
+	// Send Welcome & Passcode Email via Resend/Zoho using noreply@technikolympiad.com
+	_ = h.zohoService.SendAdminWelcomeEmail(newUser.Email, newUser.Name, req.Role, req.Zone, password)
+
 	c.JSON(http.StatusCreated, gin.H{
 		"success": true,
-		"message": "Admin user created successfully",
+		"message": "Admin user registered and official passcode email sent successfully",
 		"user": dto.AdminUserDTO{
 			ID:        newUser.ID,
 			Name:      newUser.Name,

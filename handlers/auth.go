@@ -221,12 +221,18 @@ func (h *AuthHandler) GetActivationStatus(c *gin.Context) {
 		}
 
 		if err == nil && school != nil {
+			var mfaSetupToken string
+			if school.IsActivated && !school.TwoFactorEnable {
+				mfaSetupToken, _ = middleware.GeneratePurposeToken(school.Email, "school", "mfa-setup", h.cfg.JWTSecret, 30*time.Minute)
+			}
+
 			c.JSON(http.StatusOK, gin.H{
 				"success":         true,
 				"isActivated":     school.IsActivated,
 				"email":           school.Email,
 				"schoolName":      school.SchoolName,
 				"twoFactorEnable": school.TwoFactorEnable,
+				"mfaSetupToken":   mfaSetupToken,
 			})
 			return
 		}
@@ -302,7 +308,7 @@ func (h *AuthHandler) resendActivationInternal(ctx context.Context, email string
 		return fmt.Errorf("failed to regenerate the activation token")
 	}
 
-	activationLink := fmt.Sprintf("%s/activation-pending?token=%s&type=school", h.cfg.FrontendURL, activationToken)
+	activationLink := fmt.Sprintf("%s/#/activation-pending?token=%s&type=school", h.cfg.FrontendURL, activationToken)
 	resendLink := h.buildResendLink(email)
 	go func(toEmail, schoolName, actLink, resLink string) {
 		_ = h.zohoService.SendActivationEmail(toEmail, schoolName, actLink, resLink)
@@ -798,7 +804,7 @@ func (h *AuthHandler) RegisterSchool(c *gin.Context) {
 	// Build the primary activation link (points at the frontend SPA) and a
 	// long-lived resend link (points at the backend directly, opened from
 	// the email itself, in case the 24h activation link has expired).
-	activationLink := fmt.Sprintf("%s/activation-pending?token=%s&type=school", h.cfg.FrontendURL, activationToken)
+	activationLink := fmt.Sprintf("%s/#/activation-pending?token=%s&type=school", h.cfg.FrontendURL, activationToken)
 	resendLink := h.buildResendLink(req.Email)
 
 	// Send activation email link asynchronously in background goroutine so registration response is instant
@@ -1071,6 +1077,147 @@ func (h *AuthHandler) GetMe(c *gin.Context) {
 		SessionExpiry:   sExp,
 		CreatedAt:       user.CreatedAt,
 		UpdatedAt:       user.UpdatedAt,
+	})
+}
+
+// GetSchoolDetails retrieves school details by session (JWT context or Bearer/Cookie token), schoolId, or email query param.
+func (h *AuthHandler) GetSchoolDetails(c *gin.Context) {
+	_ = database.EnsureConnected()
+	ctx := context.Background()
+
+	schoolID := strings.TrimSpace(c.Query("schoolId"))
+	if schoolID == "" {
+		schoolID = strings.TrimSpace(c.Query("id"))
+	}
+	email := strings.TrimSpace(c.Query("email"))
+
+	// 1. If not provided as query param, check JWT context from middleware
+	if schoolID == "" && email == "" {
+		if val, exists := c.Get("userId"); exists {
+			schoolID = val.(string)
+		}
+	}
+
+	// 2. Also check Authorization header or Cookie directly
+	if schoolID == "" && email == "" {
+		var tokenStr string
+		if cookieToken, err := c.Cookie(middleware.JWTCookieName); err == nil && cookieToken != "" {
+			tokenStr = cookieToken
+		}
+		if tokenStr == "" {
+			authHeader := c.GetHeader("Authorization")
+			if strings.HasPrefix(authHeader, "Bearer ") {
+				tokenStr = strings.TrimPrefix(authHeader, "Bearer ")
+			}
+		}
+		if tokenStr != "" {
+			if claims, err := middleware.ValidateJWT(tokenStr, h.cfg.JWTSecret); err == nil && claims != nil {
+				if claims.Role == "school" || claims.Role == "" {
+					schoolID = claims.UserID
+				}
+				if email == "" && claims.Role == "school" {
+					email = claims.Email
+				}
+			}
+		}
+	}
+
+	if schoolID == "" && email == "" {
+		c.JSON(http.StatusUnauthorized, dto.APIError{
+			Success: false,
+			Error:   "School identification required. Please provide schoolId, email, or a valid authorization token.",
+		})
+		return
+	}
+
+	var school *db.SchoolDetailsModel
+	var err error
+
+	if schoolID != "" {
+		school, err = database.Client.SchoolDetails.FindUnique(
+			db.SchoolDetails.ID.Equals(schoolID),
+		).Exec(ctx)
+	}
+
+	if (school == nil || err != nil) && email != "" {
+		school, err = database.Client.SchoolDetails.FindUnique(
+			db.SchoolDetails.Email.Equals(email),
+		).Exec(ctx)
+	}
+
+	if err != nil || school == nil {
+		c.JSON(http.StatusNotFound, dto.APIError{
+			Success: false,
+			Error:   "School profile not found",
+		})
+		return
+	}
+
+	board, _ := school.Board()
+	state, _ := school.State()
+	district, _ := school.District()
+	city, _ := school.City()
+	address, _ := school.Address()
+	pincode, _ := school.Pincode()
+	phone, _ := school.Phone()
+	principal, _ := school.PrincipalName()
+	coordName, _ := school.CoordinatorName()
+	coordDesig, _ := school.CoordinatorDesignation()
+	coordMob, _ := school.CoordinatorMobile()
+	coordEmail, _ := school.CoordinatorEmail()
+	cID, _ := school.CsrfID()
+	sID, _ := school.SessionID()
+	ip, _ := school.IPAddress()
+	sExp := parseSessionExpiry(school.SessionExpiry())
+
+	res := dto.SchoolResponse{
+		ID:                     school.ID,
+		SchoolCode:             school.SchoolCode,
+		SchoolName:             school.SchoolName,
+		Email:                  school.Email,
+		Board:                  board,
+		State:                  state,
+		District:               district,
+		City:                   city,
+		Address:                address,
+		Pincode:                pincode,
+		Phone:                  phone,
+		PrincipalName:          principal,
+		CoordinatorName:        coordName,
+		CoordinatorDesignation: coordDesig,
+		CoordinatorMobile:      coordMob,
+		CoordinatorEmail:       coordEmail,
+		TwoFactorEnable:        school.TwoFactorEnable,
+		IsActivated:            school.IsActivated,
+		IsVerified:             school.IsVerified,
+		CSRFID:                 cID,
+		SessionID:              sID,
+		IPAddress:              ip,
+		RememberMe:             school.RememberMe,
+		SessionExpiry:          sExp,
+		CreatedAt:              school.CreatedAt,
+		UpdatedAt:              school.UpdatedAt,
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":                true,
+		"school":                 res,
+		"id":                     res.ID,
+		"schoolCode":             res.SchoolCode,
+		"schoolName":             res.SchoolName,
+		"email":                  res.Email,
+		"board":                  res.Board,
+		"state":                  res.State,
+		"district":               res.District,
+		"city":                   res.City,
+		"address":                res.Address,
+		"pincode":                res.Pincode,
+		"phone":                  res.Phone,
+		"principalName":          res.PrincipalName,
+		"coordinatorName":        res.CoordinatorName,
+		"coordinatorDesignation": res.CoordinatorDesignation,
+		"coordinatorMobile":      res.CoordinatorMobile,
+		"coordinatorEmail":       res.CoordinatorEmail,
 	})
 }
 

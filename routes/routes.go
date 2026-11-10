@@ -1,6 +1,7 @@
 package routes
 
 import (
+	"net/http"
 	"strings"
 	"time"
 
@@ -22,27 +23,48 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	r.Use(middleware.RequestLoggerMiddleware())
 	r.Use(middleware.GlobalErrorHandlerMiddleware())
 
-	// 2. CORS configuration: Dynamically allow any localhost / 127.0.0.1 port and production domains
-	r.Use(cors.New(cors.Config{
-		AllowOriginFunc: func(origin string) bool {
-			if strings.HasPrefix(origin, "http://localhost:") ||
-				strings.HasPrefix(origin, "http://127.0.0.1:") ||
-				origin == "http://localhost" ||
-				origin == "http://127.0.0.1" ||
-				origin == "https://www.technikolympiad.com" ||
-				origin == "https://technikolympiad.com" {
-				return true
-			}
-			return false
-		},
+	// 2. Health check endpoints for Docker / Kubernetes / Cloud Load Balancers
+	healthHandler := func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"status":    "healthy",
+			"service":   "technik-server",
+			"timestamp": time.Now().UTC().Format(time.RFC3339),
+		})
+	}
+	r.GET("/health", healthHandler)
+	r.GET("/api/health", healthHandler)
+
+	// 3. CORS configuration: Dynamically allow any localhost / 127.0.0.1 port and production domains
+	corsConfig := cors.Config{
 		AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization", "X-CSRF-Token"},
 		ExposeHeaders:    []string{"Content-Length", "X-CSRF-Token"},
 		AllowCredentials: true,
 		MaxAge:           12 * time.Hour,
-	}))
+	}
+	corsConfig.AllowOriginFunc = func(origin string) bool {
+		if strings.HasPrefix(origin, "http://localhost:") ||
+			strings.HasPrefix(origin, "http://127.0.0.1:") ||
+			origin == "http://localhost" ||
+			origin == "http://127.0.0.1" ||
+			origin == "https://www.technikolympiad.com" ||
+			origin == "https://technikolympiad.com" ||
+			strings.HasSuffix(origin, ".vercel.app") ||
+			strings.HasSuffix(origin, ".onrender.com") ||
+			strings.HasSuffix(origin, ".netlify.app") {
+			return true
+		}
+		if cfg.FrontendURL != "" {
+			trimmed := strings.TrimRight(cfg.FrontendURL, "/")
+			if origin == trimmed || origin == cfg.FrontendURL {
+				return true
+			}
+		}
+		return false
+	}
+	r.Use(cors.New(corsConfig))
 
-	// 3. CSRF Protection Middleware
+	// 4. CSRF Protection Middleware
 	r.Use(middleware.CSRFMiddleware(cfg))
 
 	// Static file serving for uploaded certificates and documents
@@ -52,6 +74,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	technikHandler := handlers.NewTechnikHandler(cfg)
 	adminHandler := handlers.NewAdminHandler(cfg)
 	olympiadTestHandler := handlers.NewOlympiadTestHandler(cfg)
+	assessmentHandler := handlers.NewAcademicAssessmentHandler(cfg)
 
 	// Rate limiters for brute-force and abuse protection
 	authLimiter := middleware.NewRateLimiter(5, 1*time.Minute)
@@ -92,6 +115,12 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 				adminProtected.POST("/olympiad-tests/student/:allocationId/reset", olympiadTestHandler.ResetStudentTest)
 				adminProtected.POST("/olympiad-tests/cert-template", olympiadTestHandler.UploadCertTemplate)
 				adminProtected.PATCH("/olympiad-tests/student/:allocationId/certificate", olympiadTestHandler.IssueCertificate)
+
+				// News & Events Admin Management
+				adminProtected.GET("/news-events", adminHandler.GetNewsEvents)
+				adminProtected.POST("/news-events", adminHandler.CreateNewsEvent)
+				adminProtected.PUT("/news-events/:id", adminHandler.UpdateNewsEvent)
+				adminProtected.DELETE("/news-events/:id", adminHandler.DeleteNewsEvent)
 			}
 		}
 
@@ -109,6 +138,9 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			exam.POST("/block", olympiadTestHandler.BlockExamSession)
 			exam.POST("/submit", olympiadTestHandler.SubmitExam)
 		}
+
+		// Public News & Events endpoint for frontend / cards
+		api.GET("/news-events", adminHandler.GetNewsEvents)
 
 		// Global Auth & OTP routes
 		auth := api.Group("/auth")
@@ -135,11 +167,13 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			}
 		}
 
-		// School Auth routes (public)
+		// School Auth & Profile routes
 		school := api.Group("/school")
 		{
 			school.POST("/register", authHandler.RegisterSchool)
 			school.POST("/login", authLimiter.Middleware("school-login"), authHandler.LoginSchool)
+			school.GET("/details", authHandler.GetSchoolDetails)
+			school.GET("/profile", authHandler.GetSchoolDetails)
 		}
 
 		// Public Contact Us & Inquiries route
@@ -158,8 +192,28 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 
 			portal.POST("/olympiad/register", technikHandler.RegisterOlympiad)
 			portal.GET("/olympiad/registrations", technikHandler.GetOlympiadRegistrations)
+
+			// Academic Assessment Setup & Student Evaluation Grid routes
+			portal.POST("/school/academic-assessment/create", assessmentHandler.CreateAcademicAssessment)
+			portal.GET("/school/academic-assessment", assessmentHandler.GetAcademicAssessments)
+			portal.GET("/school/academic-assessment/:id", assessmentHandler.GetAcademicAssessmentByID)
+			portal.GET("/school/academic-assessment/:id/students", assessmentHandler.GetAssessmentStudents)
+			portal.POST("/school/academic-assessment/:id/evaluate", assessmentHandler.EvaluateStudentAssessment)
+			portal.POST("/school/academic-assessment/:id/promote", assessmentHandler.PromoteStudentAssessment)
+			portal.POST("/school/academic-assessment/:id/debar", assessmentHandler.DebarStudentAssessment)
+			portal.POST("/school/academic-assessment/:id/batch", assessmentHandler.BatchAction)
+			portal.DELETE("/school/academic-assessment/:id", assessmentHandler.DeleteAcademicAssessment)
 		}
+
+		// Student Portfolio & Skill Compass Additional Data routes
+		api.GET("/student/:id/portfolio", technikHandler.GetStudentPortfolio)
+		api.POST("/student/:id/portfolio", middleware.AuthMiddleware(cfg), technikHandler.SaveStudentPortfolio)
+
+		// Razorpay Payment Gateway routes
+		api.POST("/payment/razorpay/create-order", technikHandler.CreateRazorpayOrder)
+		api.POST("/payment/razorpay/verify", technikHandler.VerifyRazorpayPayment)
 	}
 
 	return r
 }
+

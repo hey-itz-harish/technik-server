@@ -118,7 +118,17 @@ func AuthMiddleware(cfg *config.Config) gin.HandlerFunc {
 func RequireAdminRole() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		roleVal, exists := c.Get("userRole")
-		if !exists || roleVal != "admin" {
+		if !exists {
+			c.JSON(http.StatusUnauthorized, dto.APIError{
+				Success: false,
+				Error:   "Authentication required",
+			})
+			c.Abort()
+			return
+		}
+
+		role, ok := roleVal.(string)
+		if !ok || (strings.ToLower(role) != "admin") {
 			c.JSON(http.StatusForbidden, dto.APIError{
 				Success: false,
 				Error:   "Access denied. Administrator privileges required.",
@@ -126,6 +136,12 @@ func RequireAdminRole() gin.HandlerFunc {
 			c.Abort()
 			return
 		}
+
 		c.Next()
 	}
+}
+
+// AdminOnlyMiddleware alias for RequireAdminRole
+func AdminOnlyMiddleware() gin.HandlerFunc {
+	return RequireAdminRole()
 }

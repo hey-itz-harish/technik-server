@@ -17,12 +17,15 @@ type Config struct {
 	CookieSecure bool
 	FrontendURL  string
 	ZohoHost     string
-	ZohoPort     string
-	ZohoUser     string
-	ZohoPass     string
-	ZohoFrom     string
-	ResendApiKey string
-	ResendFrom   string
+	ZohoPort          string
+	ZohoUser          string
+	ZohoPass          string
+	ZohoFrom          string
+	ResendApiKey      string
+	ResendFrom        string
+	RazorpayKeyID     string
+	RazorpayKeySecret string
+	OpenAIKey         string
 }
 
 func LoadConfig() *Config {
@@ -36,17 +39,20 @@ func LoadConfig() *Config {
 	jwtSecret := getEnv("JWT_SECRET", "default_jwt_secret_change_me_2026")
 	csrfSecret := getEnv("CSRF_SECRET", "default_csrf_secret_change_me_2026")
 
-	if jwtSecret == "default_jwt_secret_change_me_2026" {
-		if os.Getenv("GIN_MODE") == "release" {
-			log.Fatal("SECURITY FATAL: JWT_SECRET must be explicitly set to a strong secret in production (.env). Exiting.")
-		} else {
-			log.Println("SECURITY WARNING: JWT_SECRET is using default development secret. Please configure JWT_SECRET for production.")
+	isProd := os.Getenv("GIN_MODE") == "release" || os.Getenv("APP_ENV") == "production"
+	if isProd {
+		if jwtSecret == "default_jwt_secret_change_me_2026" {
+			log.Println("CRITICAL SECURITY WARNING: JWT_SECRET is using insecure default fallback in production! Set JWT_SECRET in environment.")
+		}
+		if csrfSecret == "default_csrf_secret_change_me_2026" {
+			log.Println("CRITICAL SECURITY WARNING: CSRF_SECRET is using insecure default fallback in production! Set CSRF_SECRET in environment.")
 		}
 	}
-	if csrfSecret == "default_csrf_secret_change_me_2026" && os.Getenv("GIN_MODE") == "release" {
-		log.Fatal("SECURITY FATAL: CSRF_SECRET must be explicitly set to a strong secret in production (.env). Exiting.")
+
+	cookieDomain := getEnv("COOKIE_DOMAIN", "")
+	if cookieDomain == "localhost" || cookieDomain == "127.0.0.1" {
+		cookieDomain = ""
 	}
-	cookieDomain := getEnv("COOKIE_DOMAIN", "localhost")
 	cookieSecure := getEnv("COOKIE_SECURE", "false") == "true"
 	frontendRaw := getEnv("FRONTEND_URL", getEnv("FRONTEND", "https://www.technikolympiad.com"))
 	frontendURL := strings.TrimRight(frontendRaw, "/")
@@ -63,21 +69,28 @@ func LoadConfig() *Config {
 	resendApiKey := getEnv("RESEND_API_KEY", "")
 	resendFrom := getEnv("RESEND_FROM_EMAIL", "Technik Olympiad <onboarding@resend.dev>")
 
+	razorpayKeyID := getEnv("RAZORPAY_KEY_ID", "rzp_test_1DP5mmOlF5G5ag")
+	razorpayKeySecret := getEnv("RAZORPAY_KEY_SECRET", "s8vJz6Jq8Lp0Q4P3E8M2wZ1k")
+	openAIKey := getEnv("OPEN_API_SECRET", getEnv("OPENAI_API_KEY", ""))
+
 	return &Config{
-		Port:         port,
-		DatabaseURL:  dbURL,
-		JWTSecret:    jwtSecret,
-		CSRFSecret:   csrfSecret,
-		CookieDomain: cookieDomain,
-		CookieSecure: cookieSecure,
-		FrontendURL:  frontendURL,
-		ZohoHost:     zohoHost,
-		ZohoPort:     zohoPort,
-		ZohoUser:     zohoUser,
-		ZohoPass:     zohoPass,
-		ZohoFrom:     zohoFrom,
-		ResendApiKey: resendApiKey,
-		ResendFrom:   resendFrom,
+		Port:              port,
+		DatabaseURL:       dbURL,
+		JWTSecret:         jwtSecret,
+		CSRFSecret:        csrfSecret,
+		CookieDomain:      cookieDomain,
+		CookieSecure:      cookieSecure,
+		FrontendURL:       frontendURL,
+		ZohoHost:          zohoHost,
+		ZohoPort:          zohoPort,
+		ZohoUser:          zohoUser,
+		ZohoPass:          zohoPass,
+		ZohoFrom:          zohoFrom,
+		ResendApiKey:      resendApiKey,
+		ResendFrom:        resendFrom,
+		RazorpayKeyID:     razorpayKeyID,
+		RazorpayKeySecret: razorpayKeySecret,
+		OpenAIKey:         openAIKey,
 	}
 }
 

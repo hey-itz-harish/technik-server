@@ -4,3 +4,6 @@ technik-server.exe
 
 # Environment
 .env
+
+# Uploads
+uploads/
