@@ -91,6 +91,8 @@ type StudentResponse struct {
 	AcademicYear    int             `json:"academicYear,omitempty"`
 	Section         string          `json:"section,omitempty"`
 	RollNo          string          `json:"rollNo,omitempty"`
+	FatherName      string          `json:"fatherName,omitempty"`
+	MotherName      string          `json:"motherName,omitempty"`
 	ParentName      string          `json:"parentName,omitempty"`
 	ParentPhone     string          `json:"parentPhone,omitempty"`
 	SchoolID        string          `json:"schoolId,omitempty"`

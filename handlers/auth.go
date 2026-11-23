@@ -572,6 +572,9 @@ func (h *AuthHandler) VerifyOTP(c *gin.Context) {
 		coordDesig, _ := updatedSchool.CoordinatorDesignation()
 		coordMob, _ := updatedSchool.CoordinatorMobile()
 		coordEmail, _ := updatedSchool.CoordinatorEmail()
+		if p, cn, cd, cm, ce := getCoordinatorForSchool(updatedSchool.ID); cn != "" || p != "" {
+			principal, coordName, coordDesig, coordMob, coordEmail = p, cn, cd, cm, ce
+		}
 		cID, _ := updatedSchool.CsrfID()
 		sID, _ := updatedSchool.SessionID()
 		ip, _ := updatedSchool.IPAddress()
@@ -632,11 +635,6 @@ func (h *AuthHandler) VerifyOTP(c *gin.Context) {
 
 	if err != nil || student == nil {
 		c.JSON(http.StatusNotFound, dto.APIError{Success: false, Error: "Student not found"})
-		return
-	}
-
-	if !student.IsActivated {
-		c.JSON(http.StatusForbidden, dto.APIError{Success: false, Error: "Account is not activated. Please activate your account via email first."})
 		return
 	}
 
@@ -801,6 +799,20 @@ func (h *AuthHandler) RegisterSchool(c *gin.Context) {
 		return
 	}
 
+	// Insert coordinator details into CoordinatorDetails table tagged with school ID and schoolCode
+	if sqlDB := database.GetSQLDB(); sqlDB != nil {
+		coordID := uuid.New().String()
+		_, _ = sqlDB.Exec(`
+			INSERT INTO "CoordinatorDetails" (
+				"id", "schoolId", "schoolName", "schoolCode", 
+				"principalName", "coordinatorName", "coordinatorDesignation", "coordinatorMobile", "coordinatorEmail",
+				"createdAt", "updatedAt"
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+			ON CONFLICT ("id") DO NOTHING;
+		`, coordID, newSchool.ID, newSchool.SchoolName, newSchool.SchoolCode,
+			req.PrincipalName, req.CoordinatorName, req.CoordinatorDesignation, req.CoordinatorMobile, req.CoordinatorEmail)
+	}
+
 	// Build the primary activation link (points at the frontend SPA) and a
 	// long-lived resend link (points at the backend directly, opened from
 	// the email itself, in case the 24h activation link has expired).
@@ -821,7 +833,7 @@ func (h *AuthHandler) RegisterSchool(c *gin.Context) {
 	})
 }
 
-// LoginSchool authenticates school by email/password. Fails if isActivated
+// LoginSchool authenticates school by email or school code and password. Fails if isActivated
 // is false. On success it does NOT issue a session yet — instead it sends a
 // one-time code to the school's email. The caller must then complete
 // /api/auth/verify-otp (mode=mail or mode=msauth) before a session cookie
@@ -834,17 +846,28 @@ func (h *AuthHandler) LoginSchool(c *gin.Context) {
 	}
 
 	ctx := context.Background()
+	inputIdentifier := strings.TrimSpace(req.Email)
+
 	school, err := database.Client.SchoolDetails.FindUnique(
-		db.SchoolDetails.Email.Equals(req.Email),
+		db.SchoolDetails.Email.Equals(inputIdentifier),
 	).Exec(ctx)
 
 	if err != nil || school == nil {
-		c.JSON(http.StatusUnauthorized, dto.APIError{Success: false, Error: "Invalid email or password"})
+		school, err = database.Client.SchoolDetails.FindFirst(
+			db.SchoolDetails.Or(
+				db.SchoolDetails.ID.Equals(inputIdentifier),
+				db.SchoolDetails.SchoolCode.Equals(inputIdentifier),
+			),
+		).Exec(ctx)
+	}
+
+	if err != nil || school == nil {
+		c.JSON(http.StatusUnauthorized, dto.APIError{Success: false, Error: "Invalid school email or password"})
 		return
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(school.Password), []byte(req.Password)); err != nil {
-		c.JSON(http.StatusUnauthorized, dto.APIError{Success: false, Error: "Invalid email or password"})
+		c.JSON(http.StatusUnauthorized, dto.APIError{Success: false, Error: "Invalid school email or password"})
 		return
 	}
 
@@ -881,6 +904,87 @@ func (h *AuthHandler) LoginSchool(c *gin.Context) {
 		Success: true,
 		Message: "Login credentials verified. A verification code has been sent to your email — please complete verification to continue.",
 		Email:   school.Email,
+	})
+}
+
+// LoginStudent authenticates a student by email, rollNo, or ID and password.
+// On success, it issues a 6-digit OTP code to the student's email and returns LoginPendingResponse.
+func (h *AuthHandler) LoginStudent(c *gin.Context) {
+	var req dto.StudentLoginRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: FormatValidationError(err)})
+		return
+	}
+
+	ctx := context.Background()
+	identifier := strings.TrimSpace(req.Email)
+
+	student, err := database.Client.StudentDetails.FindFirst(
+		db.StudentDetails.Email.Equals(identifier),
+	).With(db.StudentDetails.School.Fetch()).Exec(ctx)
+
+	if err != nil || student == nil {
+		student, err = database.Client.StudentDetails.FindFirst(
+			db.StudentDetails.Or(
+				db.StudentDetails.RollNo.Equals(identifier),
+				db.StudentDetails.ID.Equals(identifier),
+			),
+		).With(db.StudentDetails.School.Fetch()).Exec(ctx)
+	}
+
+	if err != nil || student == nil {
+		c.JSON(http.StatusUnauthorized, dto.APIError{Success: false, Error: "Invalid student credentials. Student account not found."})
+		return
+	}
+
+	storedPass, hasPass := student.Password()
+	if hasPass && storedPass != "" {
+		if err := bcrypt.CompareHashAndPassword([]byte(storedPass), []byte(req.Password)); err != nil {
+			if storedPass != req.Password {
+				c.JSON(http.StatusUnauthorized, dto.APIError{Success: false, Error: "Invalid student password"})
+				return
+			}
+		}
+	} else {
+		// If student has no password set yet (e.g. registered by school), register it now
+		hashedPass, _ := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+		_, _ = database.Client.StudentDetails.FindUnique(
+			db.StudentDetails.ID.Equals(student.ID),
+		).Update(
+			db.StudentDetails.Password.Set(string(hashedPass)),
+		).Exec(ctx)
+	}
+
+	studentEmail, hasEmail := student.Email()
+	if !hasEmail || studentEmail == "" {
+		c.JSON(http.StatusBadRequest, dto.APIError{
+			Success: false,
+			Error:   "No email address linked to this student record for verification. Please contact your school coordinator.",
+		})
+		return
+	}
+
+	otpCode := GenerateNumericOTP()
+	otpExpiry := time.Now().Add(10 * time.Minute)
+
+	_, err = database.Client.StudentDetails.FindUnique(
+		db.StudentDetails.ID.Equals(student.ID),
+	).Update(
+		db.StudentDetails.Otp.Set(otpCode),
+		db.StudentDetails.OtpExpiry.Set(otpExpiry),
+	).Exec(ctx)
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.APIError{Success: false, Error: "Failed to prepare verification code"})
+		return
+	}
+
+	_ = h.zohoService.SendOTPEmail(studentEmail, student.StudentName, otpCode)
+
+	c.JSON(http.StatusOK, dto.LoginPendingResponse{
+		Success: true,
+		Message: "Student credentials verified. A 6-digit verification code has been sent to your registered email.",
+		Email:   studentEmail,
 	})
 }
 
@@ -1011,6 +1115,9 @@ func (h *AuthHandler) GetMe(c *gin.Context) {
 		coordDesig, _ := school.CoordinatorDesignation()
 		coordMob, _ := school.CoordinatorMobile()
 		coordEmail, _ := school.CoordinatorEmail()
+		if p, cn, cd, cm, ce := getCoordinatorForSchool(school.ID); cn != "" || p != "" {
+			principal, coordName, coordDesig, coordMob, coordEmail = p, cn, cd, cm, ce
+		}
 		cID, _ := school.CsrfID()
 		sID, _ := school.SessionID()
 		ip, _ := school.IPAddress()
@@ -1165,6 +1272,9 @@ func (h *AuthHandler) GetSchoolDetails(c *gin.Context) {
 	coordDesig, _ := school.CoordinatorDesignation()
 	coordMob, _ := school.CoordinatorMobile()
 	coordEmail, _ := school.CoordinatorEmail()
+	if p, cn, cd, cm, ce := getCoordinatorForSchool(school.ID); cn != "" || p != "" {
+		principal, coordName, coordDesig, coordMob, coordEmail = p, cn, cd, cm, ce
+	}
 	cID, _ := school.CsrfID()
 	sID, _ := school.SessionID()
 	ip, _ := school.IPAddress()
@@ -1258,4 +1368,19 @@ func (h *AuthHandler) SubmitContactEnquiry(c *gin.Context) {
 		"message": "Your message has been sent successfully. We will get back to you shortly.",
 	})
 }
+
+// getCoordinatorForSchool fetches the active coordinator and principal details from CoordinatorDetails table
+func getCoordinatorForSchool(schoolID string) (principal, coordName, coordDesig, coordMob, coordEmail string) {
+	if sqlDB := database.GetSQLDB(); sqlDB != nil && schoolID != "" {
+		_ = sqlDB.QueryRow(`
+			SELECT COALESCE("principalName", ''), COALESCE("coordinatorName", ''), 
+			       COALESCE("coordinatorDesignation", ''), COALESCE("coordinatorMobile", ''), COALESCE("coordinatorEmail", '')
+			FROM "CoordinatorDetails"
+			WHERE "schoolId" = $1
+			ORDER BY "createdAt" DESC LIMIT 1;
+		`, schoolID).Scan(&principal, &coordName, &coordDesig, &coordMob, &coordEmail)
+	}
+	return
+}
+
 

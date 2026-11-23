@@ -17,6 +17,7 @@ import (
 	"technik-server/prisma/db"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 type TechnikHandler struct {
@@ -177,11 +178,11 @@ func (h *TechnikHandler) NominateTechnikPride(c *gin.Context) {
 		existingCount := len(existingNoms)
 		incomingCount := len(batchReq.Nominations)
 
-		// Enforce Quota: Max 2 nominations per school per academic year
-		if existingCount+incomingCount > 2 {
+		// Enforce Quota: Max 8 nominations per school per academic year (across 4 tiers: Foundation, Preparatory, Aspire, Aspire Plus)
+		if existingCount+incomingCount > 8 {
 			c.JSON(http.StatusBadRequest, dto.APIError{
 				Success: false,
-				Error: fmt.Sprintf("Annual Quota Limit Exceeded: Each school can nominate a maximum of 2 students per academic year. You have %d registered and attempted to add %d more.", existingCount, incomingCount),
+				Error: fmt.Sprintf("Annual Quota Limit Exceeded: Each school can nominate a maximum of 8 students per academic year (up to 2 students across each of the 4 categories: Foundation, Preparatory, Aspire, Aspire Plus). You have %d registered and attempted to add %d more.", existingCount, incomingCount),
 			})
 			return
 		}
@@ -221,9 +222,16 @@ func (h *TechnikHandler) NominateTechnikPride(c *gin.Context) {
 				nomStat, _ := res.NominationStatus()
 				admStat, _ := res.AdminStatus()
 
+				if nom.StudentID != "" {
+					if sqlDB := database.GetSQLDB(); sqlDB != nil {
+						_, _ = sqlDB.Exec(`UPDATE "TechnikPrideNomination" SET "studentId" = $1 WHERE id = $2;`, nom.StudentID, res.ID)
+					}
+				}
+
 				createdResponses = append(createdResponses, dto.TechnikPrideNominationResponse{
 					ID:                  res.ID,
 					SchoolID:            schID,
+					StudentID:           nom.StudentID,
 					AcademicYear:        res.AcademicYear,
 					StudentName:         res.StudentName,
 					Class:               res.Class,
@@ -300,10 +308,10 @@ func (h *TechnikHandler) NominateTechnikPride(c *gin.Context) {
 	}
 
 	existingCount := len(existingNoms)
-	if existingCount >= 2 {
+	if existingCount >= 8 {
 		c.JSON(http.StatusBadRequest, dto.APIError{
 			Success: false,
-			Error:   fmt.Sprintf("Annual Quota Limit Exceeded: Each school can nominate a maximum of 2 students per academic year (currently %d registered).", existingCount),
+			Error:   fmt.Sprintf("Annual Quota Limit Exceeded: Each school can nominate a maximum of 8 students per academic year across the 4 categories (currently %d registered).", existingCount),
 		})
 		return
 	}
@@ -340,6 +348,12 @@ func (h *TechnikHandler) NominateTechnikPride(c *gin.Context) {
 	supDoc, _ := res.SupportingDocument()
 	nomStat, _ := res.NominationStatus()
 	admStat, _ := res.AdminStatus()
+
+	if singleReq.StudentID != "" {
+		if sqlDB := database.GetSQLDB(); sqlDB != nil {
+			_, _ = sqlDB.Exec(`UPDATE "TechnikPrideNomination" SET "studentId" = $1 WHERE id = $2;`, singleReq.StudentID, res.ID)
+		}
+	}
 
 	// Also sync into StudentDetails schema
 	var stParams []db.StudentDetailsSetParam
@@ -701,8 +715,7 @@ func (h *TechnikHandler) GetSchoolStudents(c *gin.Context) {
 	})
 }
 
-// RegisterOlympiad handles student registration in array for Olympiad tracks
-// and also adds registered students into StudentDetails schema with category "Olympiad - {track}".
+// RegisterOlympiad handles student registration for Olympiad tracks and stores them in olympiadParticipants table
 func (h *TechnikHandler) RegisterOlympiad(c *gin.Context) {
 	var req dto.OlympiadRegistrationRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -710,15 +723,20 @@ func (h *TechnikHandler) RegisterOlympiad(c *gin.Context) {
 		return
 	}
 
-	ctx := context.Background()
-	currentYear := time.Now().Year()
-	year := req.AcademicYear
-	if year <= 0 {
-		year = currentYear
+	sqlDB := database.GetSQLDB()
+	if sqlDB == nil {
+		c.JSON(http.StatusInternalServerError, dto.APIError{Success: false, Error: "Database connection unavailable"})
+		return
 	}
 
 	userRole, _ := c.Get("userRole")
 	targetSchoolID := req.SchoolID
+	userEmail, _ := c.Get("userEmail")
+	creator := "School Portal"
+	if em, ok := userEmail.(string); ok && em != "" {
+		creator = em
+	}
+
 	if userRole == "school" || targetSchoolID == "" {
 		if val, exists := c.Get("userId"); exists {
 			targetSchoolID = val.(string)
@@ -730,90 +748,208 @@ func (h *TechnikHandler) RegisterOlympiad(c *gin.Context) {
 		return
 	}
 
-	// Create Olympiad Registration Batch Header
-	var regParams []db.OlympiadRegistrationSetParam
-	regParams = append(regParams, db.OlympiadRegistration.AcademicYear.Set(year))
-	regParams = append(regParams, db.OlympiadRegistration.TotalStudents.Set(len(req.Students)))
-
-	if targetSchoolID != "" {
-		regParams = append(regParams, db.OlympiadRegistration.School.Link(
-			db.SchoolDetails.ID.Equals(targetSchoolID),
-		))
+	// Fetch school details (schoolName & schoolCode)
+	var schoolName, schoolCode string
+	_ = sqlDB.QueryRow(`SELECT "schoolName", "schoolCode" FROM "SchoolDetails" WHERE id = $1 LIMIT 1;`, targetSchoolID).Scan(&schoolName, &schoolCode)
+	if schoolName == "" {
+		schoolName = "Technik Partner School"
 	}
 
-	registration, err := database.Client.OlympiadRegistration.CreateOne(
-		regParams...,
-	).Exec(ctx)
+	testID := req.TestID
+	now := time.Now()
+	var registeredParticipants []dto.OlympiadParticipantResponse
+	duplicateCount := 0
 
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, dto.APIError{Success: false, Error: "Failed to create Olympiad registration: " + err.Error()})
-		return
-	}
-
-	// Create student entries in array and sync into StudentDetails
-	var studentResponses []dto.OlympiadStudentResponse
 	for _, st := range req.Students {
-		stRes, err := database.Client.OlympiadStudent.CreateOne(
-			db.OlympiadStudent.OlympiadRegistration.Link(
-				db.OlympiadRegistration.ID.Equals(registration.ID),
-			),
-			db.OlympiadStudent.StudentName.Set(st.StudentName),
-			db.OlympiadStudent.Class.Set(st.Class),
-			db.OlympiadStudent.Gender.Set(st.Gender),
-			db.OlympiadStudent.OlympiadTrack.Set(st.OlympiadTrack),
-		).Exec(ctx)
+		studentID := st.StudentID
+		studentName := st.StudentName
+		gender := st.Gender
 
-		if err == nil && stRes != nil {
-			studentResponses = append(studentResponses, dto.OlympiadStudentResponse{
-				ID:            stRes.ID,
-				StudentName:   stRes.StudentName,
-				Class:         stRes.Class,
-				Gender:        stRes.Gender,
-				OlympiadTrack: stRes.OlympiadTrack,
-				CreatedAt:     stRes.CreatedAt,
-			})
+		// If studentId is passed, autofill and verify from StudentDetails
+		if studentID != "" {
+			var dbName, dbGender string
+			_ = sqlDB.QueryRow(`SELECT "studentName", gender FROM "StudentDetails" WHERE id = $1 LIMIT 1;`, studentID).Scan(&dbName, &dbGender)
+			if dbName != "" {
+				studentName = dbName
+			}
+			if dbGender != "" {
+				gender = dbGender
+			}
+		}
 
-			// Add to StudentDetails schema
-			var sdParams []db.StudentDetailsSetParam
-			sdParams = append(sdParams,
-				db.StudentDetails.Gender.Set(st.Gender),
-				db.StudentDetails.Category.Set(st.OlympiadTrack),
-				db.StudentDetails.Status.Set("Registered & Verified"),
-				db.StudentDetails.AcademicYear.Set(year),
-			)
-			if targetSchoolID != "" {
-				sdParams = append(sdParams, db.StudentDetails.School.Link(db.SchoolDetails.ID.Equals(targetSchoolID)))
+		// Prevent duplicate enrollment for the same test and student
+		if testID != "" {
+			var existingID string
+			if studentID != "" {
+				_ = sqlDB.QueryRow(`
+					SELECT id FROM "olympiadParticipants" 
+					WHERE test_id = $1 AND "studentId" = $2 AND deleted = FALSE LIMIT 1;
+				`, testID, studentID).Scan(&existingID)
+			}
+			if existingID == "" && studentName != "" && schoolCode != "" {
+				_ = sqlDB.QueryRow(`
+					SELECT id FROM "olympiadParticipants" 
+					WHERE test_id = $1 AND LOWER("studentName") = LOWER($2) AND "schoolCode" = $3 AND deleted = FALSE LIMIT 1;
+				`, testID, studentName, schoolCode).Scan(&existingID)
 			}
 
-			_, _ = database.Client.StudentDetails.CreateOne(
-				db.StudentDetails.StudentName.Set(st.StudentName),
-				db.StudentDetails.Grade.Set(st.Class),
-				sdParams...,
-			).Exec(ctx)
+			if existingID != "" {
+				duplicateCount++
+				continue
+			}
+		}
+
+		partID := uuid.New().String()
+		insertQuery := `
+			INSERT INTO "olympiadParticipants" (
+				id, "studentName", "studentId", "schoolName", "schoolCode", 
+				gender, "olympiadTrack", test_id, "createdAt", "createdBy", "updatedAt", deleted
+			) VALUES (
+				$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $9, FALSE
+			);
+		`
+
+		_, err := sqlDB.Exec(
+			insertQuery,
+			partID, studentName, studentID, schoolName, schoolCode,
+			gender, st.OlympiadTrack, testID, now, creator,
+		)
+
+		if err == nil {
+			registeredParticipants = append(registeredParticipants, dto.OlympiadParticipantResponse{
+				ID:            partID,
+				StudentName:   studentName,
+				StudentID:     studentID,
+				SchoolName:    schoolName,
+				SchoolCode:    schoolCode,
+				Gender:        gender,
+				OlympiadTrack: st.OlympiadTrack,
+				TestID:        testID,
+				CreatedAt:     now,
+				CreatedBy:     creator,
+			})
 		}
 	}
 
-	schID, _ := registration.SchoolID()
-	c.JSON(http.StatusCreated, dto.OlympiadBatchResponse{
-		Success: true,
-		Message: "Olympiad student registrations submitted successfully",
-		Registration: dto.OlympiadRegistrationResponse{
-			ID:            registration.ID,
-			SchoolID:      schID,
-			AcademicYear:  registration.AcademicYear,
-			TotalStudents: len(studentResponses),
-			Students:      studentResponses,
-			CreatedAt:     registration.CreatedAt,
-		},
+	msg := fmt.Sprintf("Successfully registered %d students for Olympiad.", len(registeredParticipants))
+	if duplicateCount > 0 {
+		msg += fmt.Sprintf(" (%d students skipped as already enrolled).", duplicateCount)
+	}
+
+	c.JSON(http.StatusCreated, gin.H{
+		"success":      true,
+		"message":      msg,
+		"total":        len(registeredParticipants),
+		"participants": registeredParticipants,
 	})
 }
 
-// GetOlympiadRegistrations fetches registered olympiad students/batches
-func (h *TechnikHandler) GetOlympiadRegistrations(c *gin.Context) {
-	ctx := context.Background()
-	schoolID := c.Query("schoolId")
-	yearStr := c.Query("year")
+// RegisterStudentDirectOlympiad allows an individual student to register directly for an active Olympiad from the student portal
+func (h *TechnikHandler) RegisterStudentDirectOlympiad(c *gin.Context) {
+	var req dto.DirectStudentOlympiadRegisterRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: "Please specify the Olympiad testId"})
+		return
+	}
 
+	studentID, exists := c.Get("userId")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, dto.APIError{Success: false, Error: "Authentication required"})
+		return
+	}
+
+	sqlDB := database.GetSQLDB()
+	if sqlDB == nil {
+		c.JSON(http.StatusInternalServerError, dto.APIError{Success: false, Error: "Database connection unavailable"})
+		return
+	}
+
+	// Fetch student details
+	var studentName, gender, schoolID, grade, email string
+	err := sqlDB.QueryRow(`
+		SELECT "studentName", COALESCE(gender, 'Male'), COALESCE("schoolId", ''), grade, COALESCE(email, '')
+		FROM "StudentDetails" 
+		WHERE id = $1 AND "deletedAt" IS NULL LIMIT 1;
+	`, studentID).Scan(&studentName, &gender, &schoolID, &grade, &email)
+
+	if err != nil || studentName == "" {
+		c.JSON(http.StatusNotFound, dto.APIError{Success: false, Error: "Student record not found"})
+		return
+	}
+
+	var schoolName, schoolCode string
+	if schoolID != "" {
+		_ = sqlDB.QueryRow(`SELECT "schoolName", "schoolCode" FROM "SchoolDetails" WHERE id = $1 LIMIT 1;`, schoolID).Scan(&schoolName, &schoolCode)
+	}
+	if schoolName == "" {
+		schoolName = "Independent Student Registration"
+		schoolCode = "DIRECT"
+	}
+
+	// Fetch test details
+	var testTitle, track string
+	_ = sqlDB.QueryRow(`SELECT title, track FROM olympiad_tests WHERE id = $1 AND is_active = TRUE LIMIT 1;`, req.TestID).Scan(&testTitle, &track)
+	if track == "" {
+		track = "National Science & Robotics Olympiad"
+	}
+
+	// Check if already registered
+	var existingID string
+	_ = sqlDB.QueryRow(`
+		SELECT id FROM "olympiadParticipants" 
+		WHERE test_id = $1 AND "studentId" = $2 AND deleted = FALSE LIMIT 1;
+	`, req.TestID, studentID).Scan(&existingID)
+
+	if existingID != "" {
+		c.JSON(http.StatusConflict, dto.APIError{Success: false, Error: "You are already registered for this Olympiad examination."})
+		return
+	}
+
+	partID := uuid.New().String()
+	now := time.Now()
+	creator := email
+	if creator == "" {
+		creator = "Student Portal"
+	}
+
+	insertQuery := `
+		INSERT INTO "olympiadParticipants" (
+			id, "studentName", "studentId", "schoolName", "schoolCode", 
+			gender, "olympiadTrack", test_id, "createdAt", "createdBy", "updatedAt", deleted
+		) VALUES (
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $9, FALSE
+		);
+	`
+
+	_, err = sqlDB.Exec(
+		insertQuery,
+		partID, studentName, studentID, schoolName, schoolCode,
+		gender, track, req.TestID, now, creator,
+	)
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.APIError{Success: false, Error: "Failed to join Olympiad: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{
+		"success":        true,
+		"message":        fmt.Sprintf("Successfully registered for %s!", testTitle),
+		"participant_id": partID,
+		"test_id":        req.TestID,
+		"track":          track,
+	})
+}
+
+// GetOlympiadRegistrations fetches registered olympiad participants from olympiadParticipants table
+func (h *TechnikHandler) GetOlympiadRegistrations(c *gin.Context) {
+	sqlDB := database.GetSQLDB()
+	if sqlDB == nil {
+		c.JSON(http.StatusInternalServerError, dto.APIError{Success: false, Error: "Database connection unavailable"})
+		return
+	}
+
+	schoolID := c.Query("schoolId")
 	userRole, _ := c.Get("userRole")
 	if userRole == "school" {
 		schoolID = c.GetString("userId")
@@ -823,70 +959,59 @@ func (h *TechnikHandler) GetOlympiadRegistrations(c *gin.Context) {
 		}
 	}
 
-	if schoolID == "" && userRole != "admin" {
-		c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: "schoolId parameter is required"})
-		return
-	}
-
-	year := time.Now().Year()
-	if y, err := strconv.Atoi(yearStr); err == nil && y > 0 {
-		year = y
-	}
-
-	var registrations []db.OlympiadRegistrationModel
-	var err error
-
+	var schoolName, schoolCode string
 	if schoolID != "" {
-		registrations, err = database.Client.OlympiadRegistration.FindMany(
-			db.OlympiadRegistration.AcademicYear.Equals(year),
-			db.OlympiadRegistration.SchoolID.Equals(schoolID),
-		).With(
-			db.OlympiadRegistration.Students.Fetch(),
-		).Exec(ctx)
-	} else {
-		registrations, err = database.Client.OlympiadRegistration.FindMany(
-			db.OlympiadRegistration.AcademicYear.Equals(year),
-		).With(
-			db.OlympiadRegistration.Students.Fetch(),
-		).Exec(ctx)
+		_ = sqlDB.QueryRow(`SELECT "schoolName", "schoolCode" FROM "SchoolDetails" WHERE id = $1 LIMIT 1;`, schoolID).Scan(&schoolName, &schoolCode)
 	}
 
+	query := `
+		SELECT 
+			op.id, op."studentName", COALESCE(op."studentId", ''), 
+			COALESCE(op."schoolName", ''), COALESCE(op."schoolCode", ''), 
+			op.gender, op."olympiadTrack", COALESCE(op.test_id, ''), 
+			COALESCE(t.title, ''), COALESCE(op.olympiadstudentteststatusid, ''),
+			COALESCE(s.status, 'NOT_STARTED'), COALESCE(s.score, 0),
+			COALESCE(s.certificate_issued, FALSE), COALESCE(s.certificate_url, ''),
+			op."createdAt", COALESCE(op."createdBy", ''), op."updatedAt"
+		FROM "olympiadParticipants" op
+		LEFT JOIN olympiad_tests t ON op.test_id = t.id
+		LEFT JOIN olympiadstudentteststatus s ON op.olympiadstudentteststatusid = s.id
+		WHERE op.deleted = FALSE
+	`
+	args := []interface{}{}
+	if schoolCode != "" || schoolName != "" {
+		query += ` AND (op."schoolCode" = $1 OR op."schoolName" = $2)`
+		args = append(args, schoolCode, schoolName)
+	}
+	query += ` ORDER BY op."createdAt" DESC;`
+
+	rows, err := sqlDB.Query(query, args...)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, dto.APIError{Success: false, Error: "Failed to fetch registrations: " + err.Error()})
 		return
 	}
+	defer rows.Close()
 
-	var results []dto.OlympiadRegistrationResponse
-	for _, reg := range registrations {
-		schID, _ := reg.SchoolID()
-		var stResps []dto.OlympiadStudentResponse
-		for _, st := range reg.Students() {
-			cat, _ := st.ClassCategory()
-			stResps = append(stResps, dto.OlympiadStudentResponse{
-				ID:            st.ID,
-				StudentName:   st.StudentName,
-				Class:         st.Class,
-				ClassCategory: cat,
-				Gender:        st.Gender,
-				OlympiadTrack: st.OlympiadTrack,
-				CreatedAt:     st.CreatedAt,
-			})
+	var participants []dto.OlympiadParticipantResponse
+	for rows.Next() {
+		var p dto.OlympiadParticipantResponse
+		err := rows.Scan(
+			&p.ID, &p.StudentName, &p.StudentID,
+			&p.SchoolName, &p.SchoolCode,
+			&p.Gender, &p.OlympiadTrack, &p.TestID,
+			&p.TestTitle, &p.OlympiadStudentTestStatusID,
+			&p.TestStatus, &p.Score,
+			&p.CertificateIssued, &p.CertificateURL,
+			&p.CreatedAt, &p.CreatedBy, &p.UpdatedAt,
+		)
+		if err == nil {
+			participants = append(participants, p)
 		}
-
-		results = append(results, dto.OlympiadRegistrationResponse{
-			ID:            reg.ID,
-			SchoolID:      schID,
-			AcademicYear:  reg.AcademicYear,
-			TotalStudents: len(stResps),
-			Students:      stResps,
-			CreatedAt:     reg.CreatedAt,
-		})
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"success":       true,
-		"message":       "Olympiad registrations retrieved successfully",
-		"total":         len(results),
-		"registrations": results,
+		"success":      true,
+		"total":        len(participants),
+		"participants": participants,
 	})
 }

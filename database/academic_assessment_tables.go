@@ -67,9 +67,7 @@ func EnsureAcademicAssessmentTables() {
 			deleted_by VARCHAR(255) DEFAULT ''
 		);`,
 
-		// 3. Add assessment_grid & status columns to StudentDetails table if not present
-		`ALTER TABLE "StudentDetails" ADD COLUMN IF NOT EXISTS "assessment_grid" JSONB DEFAULT '[]'::jsonb;`,
-		`ALTER TABLE "StudentDetails" ADD COLUMN IF NOT EXISTS "assessment_status" TEXT DEFAULT 'Pending';`,
+		// 3. Ensure academic_status column on StudentDetails
 		`ALTER TABLE "StudentDetails" ADD COLUMN IF NOT EXISTS "academic_status" TEXT DEFAULT 'Active';`,
 
 		// Indices for rapid query lookups
@@ -89,4 +87,3 @@ func EnsureAcademicAssessmentTables() {
 
 	log.Println("Academic Assessment tables and schema verified and migrated successfully.")
 }
-

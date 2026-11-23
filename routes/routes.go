@@ -75,6 +75,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	adminHandler := handlers.NewAdminHandler(cfg)
 	olympiadTestHandler := handlers.NewOlympiadTestHandler(cfg)
 	assessmentHandler := handlers.NewAcademicAssessmentHandler(cfg)
+	studentHandler := handlers.NewStudentManagementHandler(cfg)
 
 	// Rate limiters for brute-force and abuse protection
 	authLimiter := middleware.NewRateLimiter(5, 1*time.Minute)
@@ -100,6 +101,15 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 				adminProtected.GET("/olympiad-registrations", adminHandler.GetAdminOlympiadRegistrations)
 				adminProtected.GET("/users", adminHandler.GetAdminUsers)
 				adminProtected.POST("/users", adminHandler.CreateAdminUser)
+				adminProtected.DELETE("/users/:id", adminHandler.SoftDeleteAdminUser)
+				adminProtected.POST("/users/:id/restore", adminHandler.RestoreAdminUser)
+				adminProtected.PATCH("/users/:id/role", adminHandler.AssignUserRole)
+
+				// Portal Roles Management (Strictly for Technik Portal users, NOT for schools or students)
+				adminProtected.GET("/roles", adminHandler.GetPortalRoles)
+				adminProtected.POST("/roles", adminHandler.CreatePortalRole)
+				adminProtected.PUT("/roles/:id", adminHandler.UpdatePortalRole)
+				adminProtected.DELETE("/roles/:id", adminHandler.DeletePortalRole)
 
 				// Olympiad Test Creation, Question Upload & Proctoring Management
 				adminProtected.GET("/olympiad-tests", olympiadTestHandler.GetAdminOlympiadTests)
@@ -115,6 +125,9 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 				adminProtected.POST("/olympiad-tests/student/:allocationId/reset", olympiadTestHandler.ResetStudentTest)
 				adminProtected.POST("/olympiad-tests/cert-template", olympiadTestHandler.UploadCertTemplate)
 				adminProtected.PATCH("/olympiad-tests/student/:allocationId/certificate", olympiadTestHandler.IssueCertificate)
+				adminProtected.GET("/olympiad-tests/reminders", olympiadTestHandler.GetOlympiadQuestionReminders)
+				adminProtected.POST("/olympiad-tests/:id/batch-evaluate", olympiadTestHandler.BatchEvaluateTestSubmissions)
+				adminProtected.POST("/olympiad-tests/:id/generate-certificates", olympiadTestHandler.GenerateCertificatesForTest)
 
 				// News & Events Admin Management
 				adminProtected.GET("/news-events", adminHandler.GetNewsEvents)
@@ -141,6 +154,9 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 
 		// Public News & Events endpoint for frontend / cards
 		api.GET("/news-events", adminHandler.GetNewsEvents)
+
+		// Public Olympiad Tests for Olympiad & Events pages
+		api.GET("/public/olympiad-tests", olympiadTestHandler.GetPublicOlympiadTests)
 
 		// Global Auth & OTP routes
 		auth := api.Group("/auth")
@@ -176,6 +192,14 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			school.GET("/profile", authHandler.GetSchoolDetails)
 		}
 
+		// Student Auth & Profile routes
+		student := api.Group("/student")
+		{
+			student.POST("/login", authLimiter.Middleware("student-login"), authHandler.LoginStudent)
+			student.POST("/olympiad/register", middleware.AuthMiddleware(cfg), technikHandler.RegisterStudentDirectOlympiad)
+			student.GET("/olympiad/certificate", olympiadTestHandler.GetStudentCertificate)
+		}
+
 		// Public Contact Us & Inquiries route
 		api.POST("/contact", contactLimiter.Middleware("contact"), authHandler.SubmitContactEnquiry)
 
@@ -183,7 +207,13 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		portal := api.Group("")
 		portal.Use(middleware.AuthMiddleware(cfg))
 		{
-			portal.GET("/school/students", technikHandler.GetSchoolStudents)
+			// Student Management (Single add/edit/delete, bulk Excel import, multi-delete)
+			portal.GET("/school/students", studentHandler.GetSchoolStudents)
+			portal.POST("/school/students", studentHandler.CreateStudent)
+			portal.PUT("/school/students/:id", studentHandler.UpdateStudent)
+			portal.DELETE("/school/students/:id", studentHandler.DeleteStudent)
+			portal.POST("/school/students/bulk-delete", studentHandler.BulkDeleteStudents)
+			portal.POST("/school/students/excel", studentHandler.UploadStudentsExcel)
 			portal.POST("/school/upload-document", technikHandler.UploadDocument)
 
 			portal.POST("/technik-pride/nominate", technikHandler.NominateTechnikPride)
@@ -192,6 +222,8 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 
 			portal.POST("/olympiad/register", technikHandler.RegisterOlympiad)
 			portal.GET("/olympiad/registrations", technikHandler.GetOlympiadRegistrations)
+			portal.GET("/school/olympiad/:id/certificates", olympiadTestHandler.GetSchoolCertificates)
+			portal.GET("/school/olympiad/certificates", olympiadTestHandler.GetSchoolCertificates)
 
 			// Academic Assessment Setup & Student Evaluation Grid routes
 			portal.POST("/school/academic-assessment/create", assessmentHandler.CreateAcademicAssessment)

@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"crypto/rand"
+	"encoding/json"
 	"fmt"
 	"math/big"
 	"net/http"
@@ -199,14 +200,21 @@ func generateAccessCode() string {
 // ADMIN ENDPOINTS
 // -------------------------------------------------------------
 
-// GetAdminOlympiadTests retrieves all Olympiad tests
+// GetAdminOlympiadTests retrieves all Olympiad tests with question status and upload reminders
 func (h *OlympiadTestHandler) GetAdminOlympiadTests(c *gin.Context) {
 	initMemStore()
 
 	memMu.RLock()
 	var list []dto.OlympiadTestResponse
 	for _, t := range memTests {
-		list = append(list, *t)
+		copyTest := *t
+		qCount := len(memQuestions[t.ID])
+		copyTest.TotalQuestions = qCount
+		copyTest.HasQuestions = qCount > 0
+		if qCount == 0 {
+			copyTest.ReminderAlert = fmt.Sprintf("⚠️ Action Required: Questions not uploaded yet. Scheduled exam starts on %s.", t.StartDate)
+		}
+		list = append(list, copyTest)
 	}
 	memMu.RUnlock()
 
@@ -230,24 +238,30 @@ func (h *OlympiadTestHandler) CreateOlympiadTest(c *gin.Context) {
 
 	memMu.Lock()
 	testObj := &dto.OlympiadTestResponse{
-		ID:              testID,
-		Title:           req.Title,
-		Track:           req.Track,
-		ClassCategory:   req.ClassCategory,
-		StartDate:       req.StartDate,
-		EndDate:         req.EndDate,
-		StartTime:       req.StartTime,
-		EndTime:         req.EndTime,
-		DurationMinutes: req.DurationMinutes,
-		TotalMarks:      req.TotalMarks,
-		PassingMarks:    req.PassingMarks,
-		Instructions:    req.Instructions,
-		IsActive:        req.IsActive,
-		TotalQuestions:  len(req.Questions),
-		TotalAllocated:  0,
-		Questions:       req.Questions,
-		CreatedAt:       now,
-		UpdatedAt:       now,
+		ID:                    testID,
+		Title:                 req.Title,
+		Track:                 req.Track,
+		ClassCategory:         req.ClassCategory,
+		RegistrationStartDate: req.RegistrationStartDate,
+		RegistrationEndDate:   req.RegistrationEndDate,
+		StartDate:             req.StartDate,
+		EndDate:               req.EndDate,
+		StartTime:             req.StartTime,
+		EndTime:               req.EndTime,
+		DurationMinutes:       req.DurationMinutes,
+		TotalMarks:            req.TotalMarks,
+		PassingMarks:          req.PassingMarks,
+		Instructions:          req.Instructions,
+		IsActive:              req.IsActive,
+		TotalQuestions:        len(req.Questions),
+		HasQuestions:          len(req.Questions) > 0,
+		TotalAllocated:        0,
+		Questions:             req.Questions,
+		CreatedAt:             now,
+		UpdatedAt:             now,
+	}
+	if len(req.Questions) == 0 {
+		testObj.ReminderAlert = fmt.Sprintf("⚠️ Action Required: Questions not uploaded yet. Scheduled exam starts on %s.", req.StartDate)
 	}
 	memTests[testID] = testObj
 	memQuestions[testID] = req.Questions
@@ -260,9 +274,11 @@ func (h *OlympiadTestHandler) CreateOlympiadTest(c *gin.Context) {
 			_, _ = db.Exec(`
 				INSERT INTO olympiad_tests (
 					id, title, track, class_category, start_date, end_date, start_time, end_time,
+					registration_start_date, registration_end_date,
 					duration_minutes, total_marks, passing_marks, instructions, is_active, created_at, updated_at
-				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
 			`, testID, req.Title, req.Track, req.ClassCategory, req.StartDate, req.EndDate, req.StartTime, req.EndTime,
+				req.RegistrationStartDate, req.RegistrationEndDate,
 				req.DurationMinutes, req.TotalMarks, req.PassingMarks, req.Instructions, req.IsActive, now, now)
 		}
 	}()
@@ -1010,7 +1026,7 @@ func (h *OlympiadTestHandler) LogProctorEvent(c *gin.Context) {
 	})
 }
 
-// SubmitExam finalizes test submission, calculates score, and saves timestamp
+// SubmitExam finalizes test submission, records responses, and queues submission for batch evaluation (no instant scoring)
 func (h *OlympiadTestHandler) SubmitExam(c *gin.Context) {
 	initMemStore()
 	var req dto.StudentSubmitExamRequest
@@ -1032,64 +1048,60 @@ func (h *OlympiadTestHandler) SubmitExam(c *gin.Context) {
 
 	questions := memQuestions[alloc.TestID]
 	test := memTests[alloc.TestID]
-	score := 0
-	totalMarks := 0
-	passingMarks := 0
 	totalQuestions := len(questions)
+	if totalQuestions == 0 && test != nil {
+		totalQuestions = test.TotalQuestions
+	}
 
+	totalMarks := 0
 	if test != nil {
-		passingMarks = test.PassingMarks
-	}
-	for _, q := range questions {
-		totalMarks += q.Marks
-		qKey := fmt.Sprintf("%d", q.QuestionNumber)
-		if selected, found := req.Answers[qKey]; found && selected == q.CorrectOption {
-			score += q.Marks
-		}
+		totalMarks = test.TotalMarks
 	}
 
-	passed := score >= passingMarks
 	now := time.Now()
 	alloc.Status = "SUBMITTED"
 	alloc.Answers = req.Answers
-	alloc.Score = score
+	// NOTE: Score is deliberately not calculated at test time.
+	// It is evaluated batch-wise (100 students/batch) within 3 days of the test date.
+	alloc.Score = 0
 	alloc.TotalMarks = totalMarks
 	alloc.TotalQuestions = totalQuestions
 	alloc.CompletedAt = &now
 	alloc.ScreenShareActive = false
 	alloc.UpdatedAt = now
 
-	// Auto-issue certificate if candidate passed
-	certTemplate := ""
-	if test != nil {
-		certTemplate = test.CertificateTemplate
-		if passed && certTemplate != "" {
-			alloc.CertificateIssued = true
+	// Asynchronously update DB if reachable
+	go func(testID, codeStr string, ansMap map[string]int, compTime time.Time) {
+		db, err := database.GetRawDB()
+		if err == nil && db != nil {
+			ansJSON, _ := json.Marshal(ansMap)
+			_, _ = db.Exec(`
+				UPDATE olympiadstudentteststatus
+				SET status = 'SUBMITTED', answers = $1, completed_at = $2, screen_share_active = FALSE, updated_at = $2
+				WHERE access_code = $3;
+			`, string(ansJSON), compTime, codeStr)
 		}
-	}
+	}(alloc.TestID, code, req.Answers, now)
 
 	submissionID := fmt.Sprintf("SUB-%s-%d", strings.ReplaceAll(code, "-", ""), now.Unix()%100000)
 
-	c.JSON(http.StatusOK, dto.StudentSubmitExamResponse{
-		Success:             true,
-		Message:             "Olympiad test submitted successfully!",
-		SubmissionID:        submissionID,
-		StudentName:         alloc.StudentName,
-		SchoolName:          alloc.SchoolName,
-		Grade:               alloc.Grade,
-		AccessCode:          code,
-		TotalQuestions:      totalQuestions,
-		AttemptedCount:      len(req.Answers),
-		Score:               score,
-		TotalMarks:          totalMarks,
-		PassingMarks:        passingMarks,
-		Passed:              passed,
-		CertificateTemplate: certTemplate,
-		CompletedAt:         now,
+	c.JSON(http.StatusOK, gin.H{
+		"success":            true,
+		"message":            "Olympiad test submitted successfully! Your responses have been securely recorded. In accordance with Olympiad guidelines, scores and evaluation are computed batch-wise within 3 days of the test date.",
+		"submissionId":       submissionID,
+		"studentName":        alloc.StudentName,
+		"schoolName":         alloc.SchoolName,
+		"grade":              alloc.Grade,
+		"accessCode":         code,
+		"totalQuestions":     totalQuestions,
+		"attemptedCount":     len(req.Answers),
+		"status":             "SUBMITTED",
+		"pending_evaluation": true,
+		"completedAt":        now,
 	})
 }
 
-// GetExamResult returns the result + certificate for a submitted exam
+// GetExamResult returns the result + certificate for a submitted exam (with pending state if not yet batch evaluated)
 func (h *OlympiadTestHandler) GetExamResult(c *gin.Context) {
 	initMemStore()
 	var req dto.ExamResultRequest
@@ -1114,8 +1126,26 @@ func (h *OlympiadTestHandler) GetExamResult(c *gin.Context) {
 	}
 	memMu.RUnlock()
 
-	if !exists || alloc.Status != "SUBMITTED" {
+	if !exists || (alloc.Status != "SUBMITTED" && alloc.Status != "EVALUATED") {
 		c.JSON(http.StatusNotFound, gin.H{"success": false, "error": "Result not found or exam not yet submitted"})
+		return
+	}
+
+	// If submitted but waiting for 3-day batch evaluation window
+	if alloc.Status == "SUBMITTED" {
+		c.JSON(http.StatusOK, gin.H{
+			"success":            true,
+			"pending_evaluation": true,
+			"status":             "SUBMITTED",
+			"message":            "Your examination submission is undergoing batch evaluation. Official results will be published within 3 days of the test date.",
+			"studentName":        alloc.StudentName,
+			"schoolName":         alloc.SchoolName,
+			"grade":              alloc.Grade,
+			"accessCode":         code,
+			"totalQuestions":     alloc.TotalQuestions,
+			"attemptedCount":     len(alloc.Answers),
+			"completedAt":        alloc.CompletedAt,
+		})
 		return
 	}
 
@@ -1228,3 +1258,325 @@ func (h *OlympiadTestHandler) IssueCertificate(c *gin.Context) {
 		"certificateIssued": req.CertificateIssued,
 	})
 }
+
+// BatchEvaluateTestSubmissions evaluates student submissions for an Olympiad test in batches of up to 100
+func (h *OlympiadTestHandler) BatchEvaluateTestSubmissions(c *gin.Context) {
+	initMemStore()
+	testID := c.Param("id")
+	if testID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": "Test ID is required"})
+		return
+	}
+
+	var req dto.BatchEvaluateRequest
+	_ = c.ShouldBindJSON(&req)
+	batchSize := req.BatchSize
+	if batchSize <= 0 {
+		batchSize = 100 // default batch size of 100 students
+	}
+
+	memMu.Lock()
+	defer memMu.Unlock()
+
+	test, testExists := memTests[testID]
+	questions := memQuestions[testID]
+	if !testExists {
+		c.JSON(http.StatusNotFound, gin.H{"success": false, "error": "Olympiad test not found"})
+		return
+	}
+
+	passingMarks := test.PassingMarks
+	totalQuestions := len(questions)
+	totalMarks := 0
+	for _, q := range questions {
+		totalMarks += q.Marks
+	}
+
+	evaluatedCount := 0
+	passedCount := 0
+	failedCount := 0
+	remainingUnscored := 0
+
+	sqlDB := database.GetSQLDB()
+
+	for _, alloc := range memAllocations {
+		if alloc.TestID != testID {
+			continue
+		}
+
+		if alloc.Status == "SUBMITTED" {
+			if evaluatedCount < batchSize {
+				// Calculate score for this submission against answer key
+				studentScore := 0
+				for _, q := range questions {
+					qKey := fmt.Sprintf("%d", q.QuestionNumber)
+					if selected, found := alloc.Answers[qKey]; found && selected == q.CorrectOption {
+						studentScore += q.Marks
+					}
+				}
+
+				isPassed := studentScore >= passingMarks
+				alloc.Score = studentScore
+				alloc.TotalMarks = totalMarks
+				alloc.TotalQuestions = totalQuestions
+				alloc.Status = "EVALUATED"
+				alloc.UpdatedAt = time.Now()
+
+				if isPassed {
+					passedCount++
+					if test.CertificateTemplate != "" {
+						alloc.CertificateIssued = true
+						alloc.CertificateURL = fmt.Sprintf("/uploads/certificates/cert-%s-%s.png", testID[:8], alloc.ID[:8])
+					}
+				} else {
+					failedCount++
+				}
+
+				evaluatedCount++
+
+				// Persist evaluation to DB
+				if sqlDB != nil {
+					_, _ = sqlDB.Exec(`
+						UPDATE olympiadstudentteststatus
+						SET score = $1, total_questions = $2, status = 'EVALUATED', 
+						    certificate_issued = $3, certificate_url = $4, updated_at = CURRENT_TIMESTAMP
+						WHERE id = $5;
+					`, studentScore, totalQuestions, alloc.CertificateIssued, alloc.CertificateURL, alloc.ID)
+
+					// Update olympiadParticipants if linked
+					_, _ = sqlDB.Exec(`
+						UPDATE "olympiadParticipants"
+						SET olympiadstudentteststatusid = $1, "updatedAt" = CURRENT_TIMESTAMP
+						WHERE test_id = $2 AND ("studentName" = $3 OR "studentId" = $4);
+					`, alloc.ID, testID, alloc.StudentName, alloc.ID)
+				}
+			} else {
+				remainingUnscored++
+			}
+		}
+	}
+
+	c.JSON(http.StatusOK, dto.BatchEvaluateResponse{
+		Success:           true,
+		Message:           fmt.Sprintf("Batch evaluation complete: %d students evaluated in this batch (%d passed, %d failed). %d submissions remaining.", evaluatedCount, passedCount, failedCount, remainingUnscored),
+		TestID:            testID,
+		BatchSize:         batchSize,
+		EvaluatedCount:    evaluatedCount,
+		PassedCount:       passedCount,
+		FailedCount:       failedCount,
+		RemainingUnscored: remainingUnscored,
+	})
+}
+
+// GenerateCertificatesForTest generates certificates for all evaluated passing students within 2 days of evaluation
+func (h *OlympiadTestHandler) GenerateCertificatesForTest(c *gin.Context) {
+	initMemStore()
+	testID := c.Param("id")
+	if testID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": "Test ID is required"})
+		return
+	}
+
+	memMu.Lock()
+	defer memMu.Unlock()
+
+	test, exists := memTests[testID]
+	if !exists {
+		c.JSON(http.StatusNotFound, gin.H{"success": false, "error": "Test not found"})
+		return
+	}
+
+	if test.CertificateTemplate == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   "No certificate image template uploaded yet. Please upload a certificate template under /api/admin/olympiad-tests/cert-template first.",
+		})
+		return
+	}
+
+	sqlDB := database.GetSQLDB()
+	generatedCount := 0
+	emailedCount := 0
+	var certURLs []string
+
+	for _, alloc := range memAllocations {
+		if alloc.TestID == testID && alloc.Status == "EVALUATED" && alloc.Score >= test.PassingMarks {
+			alloc.CertificateIssued = true
+			certURL := fmt.Sprintf("/uploads/certificates/cert-%s-%s.png", testID[:8], alloc.ID[:8])
+			alloc.CertificateURL = certURL
+			certURLs = append(certURLs, certURL)
+			generatedCount++
+
+			if alloc.StudentEmail != "" {
+				emailedCount++
+			}
+
+			if sqlDB != nil {
+				_, _ = sqlDB.Exec(`
+					UPDATE olympiadstudentteststatus
+					SET certificate_issued = TRUE, certificate_url = $1, updated_at = CURRENT_TIMESTAMP
+					WHERE id = $2;
+				`, certURL, alloc.ID)
+			}
+		}
+	}
+
+	c.JSON(http.StatusOK, dto.CertificateGenerationResponse{
+		Success:         true,
+		Message:         fmt.Sprintf("Successfully generated %d certificates using template and queued for delivery.", generatedCount),
+		TestID:          testID,
+		GeneratedCount:  generatedCount,
+		EmailedCount:    emailedCount,
+		CertificateURLs: certURLs,
+	})
+}
+
+// GetOlympiadQuestionReminders checks all upcoming Olympiad tests and returns reminder alerts for any test missing questions
+func (h *OlympiadTestHandler) GetOlympiadQuestionReminders(c *gin.Context) {
+	initMemStore()
+	memMu.RLock()
+	defer memMu.RUnlock()
+
+	var alerts []dto.QuestionReminderResponse
+	now := time.Now()
+
+	for _, t := range memTests {
+		qCount := len(memQuestions[t.ID])
+		needsQ := qCount == 0
+
+		daysRemaining := 7
+		if t.StartDate != "" {
+			if parsedDate, err := time.Parse("2006-01-02", t.StartDate); err == nil {
+				diff := parsedDate.Sub(now)
+				daysRemaining = int(diff.Hours() / 24)
+			}
+		}
+
+		alertMsg := ""
+		if needsQ {
+			if daysRemaining <= 0 {
+				alertMsg = fmt.Sprintf("URGENT: Test '%s' (%s) is scheduled for today or has passed, but NO questions have been uploaded!", t.Title, t.Track)
+			} else {
+				alertMsg = fmt.Sprintf("Action Required: Please upload question paper for '%s' (%s). Scheduled start date is %s (%d days remaining).", t.Title, t.Track, t.StartDate, daysRemaining)
+			}
+		}
+
+		if needsQ {
+			alerts = append(alerts, dto.QuestionReminderResponse{
+				TestID:         t.ID,
+				TestTitle:      t.Title,
+				Track:          t.Track,
+				StartDate:      t.StartDate,
+				DaysRemaining:  daysRemaining,
+				TotalQuestions: qCount,
+				NeedsQuestions: needsQ,
+				AlertMessage:   alertMsg,
+			})
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":       true,
+		"total_alerts":  len(alerts),
+		"pending_tests": alerts,
+	})
+}
+
+// GetPublicOlympiadTests returns all active tests visible on public Olympiad and Events pages
+func (h *OlympiadTestHandler) GetPublicOlympiadTests(c *gin.Context) {
+	initMemStore()
+	memMu.RLock()
+	defer memMu.RUnlock()
+
+	var activeTests []dto.OlympiadTestResponse
+	for _, t := range memTests {
+		if t.IsActive {
+			copyTest := *t
+			copyTest.Questions = nil // Don't expose questions publicly
+			activeTests = append(activeTests, copyTest)
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"tests":   activeTests,
+	})
+}
+
+// GetSchoolCertificates lists all certificates generated for a school's students
+func (h *OlympiadTestHandler) GetSchoolCertificates(c *gin.Context) {
+	initMemStore()
+	testID := c.Param("id")
+	targetSchoolID := c.Query("schoolId")
+	if targetSchoolID == "" {
+		if sID, exists := c.Get("userId"); exists {
+			targetSchoolID = sID.(string)
+		}
+	}
+
+	memMu.RLock()
+	defer memMu.RUnlock()
+
+	var certificates []gin.H
+	for _, a := range memAllocations {
+		if (a.TestID == testID || testID == "") && a.CertificateIssued {
+			certificates = append(certificates, gin.H{
+				"allocationId":   a.ID,
+				"studentName":    a.StudentName,
+				"schoolName":     a.SchoolName,
+				"grade":          a.Grade,
+				"score":          a.Score,
+				"totalMarks":     a.TotalMarks,
+				"certificateUrl": a.CertificateURL,
+				"issued":         true,
+			})
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":      true,
+		"certificates": certificates,
+	})
+}
+
+// GetStudentCertificate returns the individual student's certificate
+func (h *OlympiadTestHandler) GetStudentCertificate(c *gin.Context) {
+	initMemStore()
+	testID := c.Query("testId")
+	studentEmail := c.Query("email")
+	accessCode := c.Query("accessCode")
+
+	memMu.RLock()
+	defer memMu.RUnlock()
+
+	var matchedAlloc *dto.StudentAllocationResponse
+	for _, a := range memAllocations {
+		if accessCode != "" && a.AccessCode == accessCode {
+			matchedAlloc = a
+			break
+		}
+		if (testID == "" || a.TestID == testID) && (studentEmail != "" && strings.EqualFold(a.StudentEmail, studentEmail)) {
+			matchedAlloc = a
+			break
+		}
+	}
+
+	if matchedAlloc == nil || !matchedAlloc.CertificateIssued {
+		c.JSON(http.StatusNotFound, gin.H{
+			"success": false,
+			"error":   "Certificate not yet available. Certificates are published after batch evaluation within 2-3 days of the test date.",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":        true,
+		"studentName":    matchedAlloc.StudentName,
+		"schoolName":     matchedAlloc.SchoolName,
+		"grade":          matchedAlloc.Grade,
+		"score":          matchedAlloc.Score,
+		"certificateUrl": matchedAlloc.CertificateURL,
+		"issued":         true,
+	})
+}
+

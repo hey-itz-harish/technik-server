@@ -288,22 +288,21 @@ func (h *AcademicAssessmentHandler) mapStudentsToAssessment(
 		}
 	}
 
-	// 3. OlympiadStudent via OlympiadRegistration
+	// 3. olympiadParticipants
 	rowsOlym, err := sqlDB.Query(
-		`SELECT os.id, os."studentName", os.class 
-		 FROM "OlympiadStudent" os 
-		 JOIN "OlympiadRegistration" o ON os."olympiadRegistrationId" = o.id 
-		 WHERE o."schoolId" = $1;`,
+		`SELECT op.id, op."studentName" 
+		 FROM "olympiadParticipants" op 
+		 WHERE (op."schoolCode" = (SELECT "schoolCode" FROM "SchoolDetails" WHERE id = $1 LIMIT 1)
+		    OR op."schoolName" = (SELECT "schoolName" FROM "SchoolDetails" WHERE id = $1 LIMIT 1))
+		   AND op.deleted = FALSE;`,
 		schoolID,
 	)
 	if err == nil {
 		defer rowsOlym.Close()
 		for rowsOlym.Next() {
-			var id, name, class string
-			if err := rowsOlym.Scan(&id, &name, &class); err == nil {
-				if classMatches(class, normTarget) {
-					studentMap[id] = name
-				}
+			var id, name string
+			if err := rowsOlym.Scan(&id, &name); err == nil {
+				studentMap[id] = name
 			}
 		}
 	}
@@ -330,13 +329,6 @@ func (h *AcademicAssessmentHandler) mapStudentsToAssessment(
 		)
 		if err == nil {
 			mappedCount++
-			// Also sync initial assessment grid to StudentDetails table
-			_, _ = sqlDB.Exec(
-				`UPDATE "StudentDetails" 
-				 SET "assessment_grid" = $1, "assessment_status" = 'Pending' 
-				 WHERE id = $2;`,
-				string(gridJSON), sID,
-			)
 		}
 	}
 
@@ -634,14 +626,6 @@ func (h *AcademicAssessmentHandler) EvaluateStudentAssessment(c *gin.Context) {
 		return
 	}
 
-	// Also update StudentDetails table
-	_, _ = sqlDB.Exec(
-		`UPDATE "StudentDetails" 
-		 SET "assessment_grid" = $1, "assessment_status" = 'Evaluated' 
-		 WHERE id = $2;`,
-		string(gridJSON), req.StudentID,
-	)
-
 	c.JSON(http.StatusOK, gin.H{
 		"success":        true,
 		"message":        fmt.Sprintf("Evaluation saved: %.1f / %.1f (%.1f%%)", obtainedMarks, totalMarks, percentage),
@@ -704,14 +688,14 @@ func (h *AcademicAssessmentHandler) PromoteStudentAssessment(c *gin.Context) {
 	if req.PromoteNextGrade && req.NextGrade != "" {
 		_, _ = sqlDB.Exec(
 			`UPDATE "StudentDetails" 
-			 SET grade = $1, "academic_status" = 'Promoted', "assessment_status" = 'Promoted' 
+			 SET grade = $1, "academic_status" = 'Promoted' 
 			 WHERE id = $2;`,
 			req.NextGrade, req.StudentID,
 		)
 	} else {
 		_, _ = sqlDB.Exec(
 			`UPDATE "StudentDetails" 
-			 SET "academic_status" = 'Promoted', "assessment_status" = 'Promoted' 
+			 SET "academic_status" = 'Promoted' 
 			 WHERE id = $1;`,
 			req.StudentID,
 		)
@@ -776,7 +760,7 @@ func (h *AcademicAssessmentHandler) DebarStudentAssessment(c *gin.Context) {
 	// Update StudentDetails table
 	_, _ = sqlDB.Exec(
 		`UPDATE "StudentDetails" 
-		 SET "assessment_status" = 'Debarred', "academic_status" = 'Debarred' 
+		 SET "academic_status" = 'Debarred' 
 		 WHERE id = $1;`,
 		req.StudentID,
 	)
@@ -844,7 +828,7 @@ func (h *AcademicAssessmentHandler) BatchAction(c *gin.Context) {
 			)
 			if err == nil {
 				successCount++
-				_, _ = sqlDB.Exec(`UPDATE "StudentDetails" SET "assessment_status" = 'Debarred' WHERE id = $1;`, sID)
+				_, _ = sqlDB.Exec(`UPDATE "StudentDetails" SET "academic_status" = 'Debarred' WHERE id = $1;`, sID)
 			}
 		}
 	}

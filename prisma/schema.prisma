@@ -8,7 +8,6 @@ generator db {
   output   = "./db"
 }
 
-
 model SchoolDetails {
   id                     String           @id @default(uuid(7))
   schoolCode             String           @unique
@@ -22,13 +21,6 @@ model SchoolDetails {
   email                  String           @unique
   phone                  String?
   password               String
-  principalName          String?
-  
-  // Coordinator Details
-  coordinatorName        String?
-  coordinatorDesignation String?
-  coordinatorMobile      String?
-  coordinatorEmail       String?
 
   // Activation, Verification & Security Fields
   isActivated            Boolean          @default(false)
@@ -52,50 +44,64 @@ model SchoolDetails {
 
   students                StudentDetails[]
   technikPrideNominations TechnikPrideNomination[]
-  olympiadRegistrations   OlympiadRegistration[]
+  coordinators            CoordinatorDetails[]
+}
+
+model CoordinatorDetails {
+  id                     String         @id @default(uuid(7))
+  schoolId               String?
+  school                 SchoolDetails? @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  schoolName             String?
+  schoolCode             String?
+  principalName          String?
+  coordinatorName        String?
+  coordinatorDesignation String?
+  coordinatorMobile      String?
+  coordinatorEmail       String?
+
+  createdAt              DateTime       @default(now())
+  updatedAt              DateTime       @updatedAt
+  deletedAt              DateTime?
+
+  @@map("CoordinatorDetails")
 }
 
 model StudentDetails {
-  id              String         @id @default(uuid(7))
-  studentName     String
-  email           String?        @unique
-  password        String?
-  phone           String?
-  grade           String
-  section         String?
-  rollNo          String?
-  parentName      String?
-  parentPhone     String?
-  address         String?
-  schoolId        String?
-  school          SchoolDetails? @relation(fields: [schoolId], references: [id])
-
-  // Enrolled Student Roster Fields
-  gender          String?
-  category        String?        // e.g. "Technik Pride Award" or "Olympiad - Robotics Olympiad"
-  classCategory   String?        // e.g. "Jr Level", "Sr Level", "Grade 3 to 5 (Jr Level)", "Grade 6 to 8 (Senior Level)"
-  status          String?        @default("Registered & Verified") // "Registered & Verified", "Nomination Received", "Pride Award Winner"
-  academicYear    Int?           @default(2026)
+  id               String         @id @default(uuid(7))
+  studentName      String
+  email            String?        @unique
+  password         String?
+  phone            String?
+  grade            String
+  section          String?
+  rollNo           String?
+  fatherName       String?
+  motherName       String?
+  parentPhone      String?
+  address          String?
+  schoolId         String?
+  school           SchoolDetails? @relation(fields: [schoolId], references: [id])
+  academicYear     Int?
 
   // Activation, Verification & Security Fields
-  isActivated     Boolean        @default(false)
-  isVerified      Boolean        @default(false)
-  activationToken String?
+  isActivated      Boolean        @default(false)
+  isVerified       Boolean        @default(false)
+  activationToken  String?
   activationExpiry DateTime?
-  otp             String?
-  otpExpiry       DateTime?
-  msAuthSecret    String?
-  twoFactorEnable Boolean        @default(false)
-  csrfID          String?
-  sessionId       String?
-  ipAddress       String?
-  sessionExpiry   DateTime?
-  rememberMe      Boolean        @default(false)
+  otp              String?
+  otpExpiry        DateTime?
+  msAuthSecret     String?
+  twoFactorEnable  Boolean        @default(false)
+  csrfID           String?
+  sessionId        String?
+  ipAddress        String?
+  sessionExpiry    DateTime?
+  rememberMe       Boolean        @default(false)
 
   // Timestamps
-  createdAt       DateTime       @default(now())
-  updatedAt       DateTime       @updatedAt
-  deletedAt       DateTime?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+  deletedAt        DateTime?
 }
 
 enum Role {
@@ -103,31 +109,57 @@ enum Role {
   USER
 }
 
+model PortalRole {
+  id          String    @id @default(uuid(7))
+  name        String    @unique
+  code        String    @unique
+  description String?
+  portalOnly  Boolean   @default(true) @map("portal_only")
+  permissions Json      @default("[]")
+  isActive    Boolean   @default(true) @map("is_active")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+  deleted     Boolean   @default(false)
+  deletedAt   DateTime? @map("deleted_at")
+
+  users       User[]
+
+  @@map("roles")
+}
+
 model User {
-  id               String    @id @default(uuid(7))
+  id               String      @id @default(uuid(7))
   name             String
-  email            String    @unique
+  email            String      @unique
   password         String
-  role             Role      @default(USER)
+  role             Role        @default(USER)
+  roleId           String?     @map("role_id")
+  roleName         String?     @default("Admin") @map("role_name")
+  zone             String?
+  mobile           String?
+  portalRole       PortalRole? @relation(fields: [roleId], references: [id])
+
+  // Soft Delete & Status
+  deleted          Boolean     @default(false)
 
   // Activation, Verification & Security Fields
-  isActivated      Boolean   @default(false)
-  isVerified       Boolean   @default(false)
+  isActivated      Boolean     @default(false)
+  isVerified       Boolean     @default(false)
   activationToken  String?
   activationExpiry DateTime?
   otp              String?
   otpExpiry        DateTime?
   msAuthSecret     String?
-  twoFactorEnable  Boolean   @default(false)
+  twoFactorEnable  Boolean     @default(false)
   csrfID           String?
   sessionId        String?
   ipAddress        String?
   sessionExpiry    DateTime?
-  rememberMe       Boolean   @default(false)
+  rememberMe       Boolean     @default(false)
 
   // Timestamps
-  createdAt        DateTime  @default(now())
-  updatedAt        DateTime  @updatedAt
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
   deletedAt        DateTime?
 }
 
@@ -164,6 +196,7 @@ model TechnikPrideNomination {
   school              SchoolDetails? @relation(fields: [schoolId], references: [id])
   academicYear        Int            @default(2026)
 
+  studentId           String?
   studentName         String
   class               String
   classCategory       String?        // e.g. "Grade 3 to 5 (Jr Level)", "Grade 6 to 8 (Senior Level)"
@@ -179,29 +212,53 @@ model TechnikPrideNomination {
   updatedAt           DateTime       @updatedAt
 }
 
-model OlympiadRegistration {
-  id            String            @id @default(uuid(7))
-  schoolId      String?
-  school        SchoolDetails?    @relation(fields: [schoolId], references: [id])
-  academicYear  Int               @default(2026)
-  totalStudents Int               @default(0)
-  createdAt     DateTime          @default(now())
-  updatedAt     DateTime          @updatedAt
+model OlympiadParticipant {
+  id                          String    @id @default(uuid(7))
+  studentName                 String    @map("studentName")
+  studentId                   String?   @map("studentId")
+  schoolName                  String?   @map("schoolName")
+  schoolCode                  String?   @map("schoolCode")
+  gender                      String    @map("gender")
+  olympiadTrack               String    @map("olympiadTrack")
+  createdAt                   DateTime  @default(now()) @map("createdAt")
+  createdBy                   String?   @map("createdBy")
+  testId                      String?   @map("test_id")
+  olympiadQuestionsId         String?   @map("olympiadquestionsid")
+  olympiadStudentTestStatusId String?   @map("olympiadstudentteststatusid")
+  updatedAt                   DateTime  @default(now()) @updatedAt @map("updatedAt")
+  updatedBy                   String?   @map("updatedBy")
+  deleted                     Boolean   @default(false) @map("deleted")
+  deletedAt                   DateTime? @map("deletedAt")
 
-  students      OlympiadStudent[]
+  @@map("olympiadParticipants")
 }
 
-model OlympiadStudent {
-  id                     String               @id @default(uuid(7))
-  olympiadRegistrationId String
-  olympiadRegistration   OlympiadRegistration @relation(fields: [olympiadRegistrationId], references: [id], onDelete: Cascade)
+model OlympiadStudentTestStatus {
+  id                 String    @id @default(uuid(7))
+  testId             String    @map("test_id")
+  studentName        String    @map("student_name")
+  studentEmail       String    @map("student_email")
+  studentPhone       String?   @default("") @map("student_phone")
+  schoolName         String?   @default("") @map("school_name")
+  grade              String?   @default("") @map("grade")
+  accessCode         String    @unique @map("access_code")
+  scheduledDate      String?   @default("") @map("scheduled_date")
+  allocatedDuration  Int       @default(60) @map("allocated_duration")
+  timeRemaining      Int       @default(3600) @map("time_remaining")
+  status             String    @default("NOT_STARTED") @map("status")
+  resumeAllowed      Boolean   @default(false) @map("resume_allowed")
+  currentQuestion    Int       @default(0) @map("current_question")
+  answers            Json      @default("{}") @map("answers")
+  proctorLogs        Json      @default("[]") @map("proctor_logs")
+  screenShareActive  Boolean   @default(false) @map("screen_share_active")
+  startedAt          DateTime? @map("started_at")
+  lastHeartbeatAt    DateTime? @map("last_heartbeat_at")
+  completedAt        DateTime? @map("completed_at")
+  score              Int?      @default(0) @map("score")
+  totalQuestions     Int?      @default(0) @map("total_questions")
+  adminNotes         String?   @default("") @map("admin_notes")
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @default(now()) @updatedAt @map("updated_at")
 
-  studentName            String
-  class                  String
-  classCategory          String?              // e.g. "Grade 3 to 5 (Jr Level)", "Grade 6 to 8 (Senior Level)"
-  gender                 String
-  olympiadTrack          String               // e.g. "Robotics Olympiad"
-
-  createdAt              DateTime             @default(now())
-  updatedAt              DateTime             @updatedAt
+  @@map("olympiadstudentteststatus")
 }

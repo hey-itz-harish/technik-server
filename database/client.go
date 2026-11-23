@@ -90,8 +90,10 @@ func GetSQLDB() *sql.DB {
 
 // AutoMigrateSchema ensures all required columns and tables exist on PostgreSQL
 func AutoMigrateSchema() {
+	EnsureCoordinatorTables()
 	EnsureOlympiadTables()
 	EnsureAcademicAssessmentTables()
+	EnsurePortalRoleTables()
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
 		return
@@ -104,15 +106,27 @@ func AutoMigrateSchema() {
 	defer rawDB.Close()
 
 	alterQueries := []string{
+		// TechnikPrideNomination updates (Task 3: add studentId)
+		`ALTER TABLE "TechnikPrideNomination" ADD COLUMN IF NOT EXISTS "studentId" TEXT;`,
+		`ALTER TABLE "TechnikPrideNomination" ADD COLUMN IF NOT EXISTS "student_id" TEXT;`,
 		`ALTER TABLE "TechnikPrideNomination" ADD COLUMN IF NOT EXISTS "nominationStatus" TEXT DEFAULT 'Submitted & Under Review';`,
 		`ALTER TABLE "TechnikPrideNomination" ADD COLUMN IF NOT EXISTS "adminStatus" TEXT DEFAULT 'Forwarded to Technik Super Admin';`,
 		`ALTER TABLE "TechnikPrideNomination" ADD COLUMN IF NOT EXISTS "classCategory" TEXT;`,
+
+		// StudentDetails updates (Task 2: remove parentName, add fatherName & motherName, remove default 2026, remove category, classCategory, status, assessment_grid, assessment_status)
+		`ALTER TABLE "StudentDetails" DROP COLUMN IF EXISTS "parentName";`,
+		`ALTER TABLE "StudentDetails" ADD COLUMN IF NOT EXISTS "fatherName" TEXT;`,
+		`ALTER TABLE "StudentDetails" ADD COLUMN IF NOT EXISTS "motherName" TEXT;`,
+		`ALTER TABLE "StudentDetails" DROP COLUMN IF EXISTS "category";`,
+		`ALTER TABLE "StudentDetails" DROP COLUMN IF EXISTS "classCategory";`,
+		`ALTER TABLE "StudentDetails" DROP COLUMN IF EXISTS "status";`,
+		`ALTER TABLE "StudentDetails" DROP COLUMN IF EXISTS "assessment_grid";`,
+		`ALTER TABLE "StudentDetails" DROP COLUMN IF EXISTS "assessment_status";`,
 		`ALTER TABLE "StudentDetails" ADD COLUMN IF NOT EXISTS "gender" TEXT;`,
-		`ALTER TABLE "StudentDetails" ADD COLUMN IF NOT EXISTS "category" TEXT;`,
-		`ALTER TABLE "StudentDetails" ADD COLUMN IF NOT EXISTS "classCategory" TEXT;`,
-		`ALTER TABLE "StudentDetails" ADD COLUMN IF NOT EXISTS "status" TEXT DEFAULT 'Registered & Verified';`,
-		`ALTER TABLE "StudentDetails" ADD COLUMN IF NOT EXISTS "academicYear" INT DEFAULT 2026;`,
-		`ALTER TABLE "OlympiadStudent" ADD COLUMN IF NOT EXISTS "classCategory" TEXT;`,
+		`ALTER TABLE "StudentDetails" ADD COLUMN IF NOT EXISTS "academicYear" INT;`,
+		`ALTER TABLE "StudentDetails" ALTER COLUMN "academicYear" DROP DEFAULT;`,
+
+		// TechnikPrideNomination extra portfolio & payment fields
 		`ALTER TABLE "TechnikPrideNomination" ADD COLUMN IF NOT EXISTS "projectTitle" TEXT;`,
 		`ALTER TABLE "TechnikPrideNomination" ADD COLUMN IF NOT EXISTS "projectDescription" TEXT;`,
 		`ALTER TABLE "TechnikPrideNomination" ADD COLUMN IF NOT EXISTS "studentQuote" TEXT;`,

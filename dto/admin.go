@@ -13,14 +13,17 @@ type AdminVerifyOTPRequest struct {
 }
 
 type AdminUserDTO struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Email     string    `json:"email"`
-	Mobile    string    `json:"mobile,omitempty"`
-	Role      string    `json:"role"`
-	Zone      string    `json:"zone,omitempty"`
-	Status    string    `json:"status"`
-	CreatedAt time.Time `json:"createdAt"`
+	ID        string     `json:"id"`
+	Name      string     `json:"name"`
+	Email     string     `json:"email"`
+	Mobile    string     `json:"mobile,omitempty"`
+	Role      string     `json:"role"`
+	RoleID    string     `json:"roleId,omitempty"`
+	Zone      string     `json:"zone,omitempty"`
+	Status    string     `json:"status"`
+	Deleted   bool       `json:"deleted"`
+	DeletedAt *time.Time `json:"deletedAt,omitempty"`
+	CreatedAt time.Time  `json:"createdAt"`
 }
 
 type CreateAdminUserRequest struct {
@@ -28,8 +31,48 @@ type CreateAdminUserRequest struct {
 	Email    string `json:"email" binding:"required,email"`
 	Password string `json:"password"`
 	Role     string `json:"role"`
+	RoleID   string `json:"roleId"`
 	Mobile   string `json:"mobile"`
 	Zone     string `json:"zone"`
+}
+
+type PortalRoleDTO struct {
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	Code        string    `json:"code"`
+	Description string    `json:"description"`
+	PortalOnly  bool      `json:"portalOnly"`
+	Permissions []string  `json:"permissions"`
+	IsActive    bool      `json:"isActive"`
+	Deleted     bool      `json:"deleted"`
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
+}
+
+type CreatePortalRoleRequest struct {
+	Name        string   `json:"name" binding:"required"`
+	Code        string   `json:"code" binding:"required"`
+	Description string   `json:"description"`
+	Permissions []string `json:"permissions"`
+}
+
+type UpdatePortalRoleRequest struct {
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Permissions []string `json:"permissions"`
+	IsActive    *bool    `json:"isActive"`
+}
+
+type AssignUserRoleRequest struct {
+	RoleID   string `json:"roleId"`
+	RoleName string `json:"roleName"`
+}
+
+type PortalRolesResponse struct {
+	Success bool            `json:"success"`
+	Message string          `json:"message"`
+	Total   int             `json:"total"`
+	Roles   []PortalRoleDTO `json:"roles"`
 }
 
 type UpdateNominationStatusRequest struct {

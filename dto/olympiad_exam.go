@@ -17,42 +17,48 @@ type OlympiadQuestionDTO struct {
 
 // OlympiadTestResponse represents an Olympiad Test record
 type OlympiadTestResponse struct {
-	ID                  string                `json:"id"`
-	Title               string                `json:"title"`
-	Track               string                `json:"track"`
-	ClassCategory       string                `json:"classCategory"`
-	StartDate           string                `json:"startDate"`
-	EndDate             string                `json:"endDate"`
-	StartTime           string                `json:"startTime"`
-	EndTime             string                `json:"endTime"`
-	DurationMinutes     int                   `json:"durationMinutes"`
-	TotalMarks          int                   `json:"totalMarks"`
-	PassingMarks        int                   `json:"passingMarks"`
-	Instructions        string                `json:"instructions"`
-	IsActive            bool                  `json:"isActive"`
-	TotalQuestions      int                   `json:"totalQuestions"`
-	TotalAllocated      int                   `json:"totalAllocated,omitempty"`
-	Questions           []OlympiadQuestionDTO `json:"questions,omitempty"`
-	CertificateTemplate string                `json:"certificateTemplate,omitempty"`
-	CreatedAt           time.Time             `json:"createdAt"`
-	UpdatedAt           time.Time             `json:"updatedAt"`
+	ID                    string                `json:"id"`
+	Title                 string                `json:"title"`
+	Track                 string                `json:"track"`
+	ClassCategory         string                `json:"classCategory"`
+	RegistrationStartDate string                `json:"registrationStartDate,omitempty"`
+	RegistrationEndDate   string                `json:"registrationEndDate,omitempty"`
+	StartDate             string                `json:"startDate"`
+	EndDate               string                `json:"endDate"`
+	StartTime             string                `json:"startTime"`
+	EndTime               string                `json:"endTime"`
+	DurationMinutes       int                   `json:"durationMinutes"`
+	TotalMarks            int                   `json:"totalMarks"`
+	PassingMarks          int                   `json:"passingMarks"`
+	Instructions          string                `json:"instructions"`
+	IsActive              bool                  `json:"isActive"`
+	TotalQuestions        int                   `json:"totalQuestions"`
+	TotalAllocated        int                   `json:"totalAllocated,omitempty"`
+	Questions             []OlympiadQuestionDTO `json:"questions,omitempty"`
+	CertificateTemplate   string                `json:"certificateTemplate,omitempty"`
+	HasQuestions          bool                  `json:"hasQuestions"`
+	ReminderAlert         string                `json:"reminderAlert,omitempty"`
+	CreatedAt             time.Time             `json:"createdAt"`
+	UpdatedAt             time.Time             `json:"updatedAt"`
 }
 
 // CreateOlympiadTestRequest is payload for creating/editing a test
 type CreateOlympiadTestRequest struct {
-	Title           string                `json:"title" binding:"required"`
-	Track           string                `json:"track" binding:"required"`
-	ClassCategory   string                `json:"classCategory" binding:"required"`
-	StartDate       string                `json:"startDate" binding:"required"`
-	EndDate         string                `json:"endDate" binding:"required"`
-	StartTime       string                `json:"startTime" binding:"required"`
-	EndTime         string                `json:"endTime" binding:"required"`
-	DurationMinutes int                   `json:"durationMinutes" binding:"required,min=5"`
-	TotalMarks      int                   `json:"totalMarks"`
-	PassingMarks    int                   `json:"passingMarks"`
-	Instructions    string                `json:"instructions"`
-	IsActive        bool                  `json:"isActive"`
-	Questions       []OlympiadQuestionDTO `json:"questions"`
+	Title                 string                `json:"title" binding:"required"`
+	Track                 string                `json:"track" binding:"required"`
+	ClassCategory         string                `json:"classCategory" binding:"required"`
+	RegistrationStartDate string                `json:"registrationStartDate,omitempty"`
+	RegistrationEndDate   string                `json:"registrationEndDate,omitempty"`
+	StartDate             string                `json:"startDate" binding:"required"`
+	EndDate               string                `json:"endDate" binding:"required"`
+	StartTime             string                `json:"startTime" binding:"required"`
+	EndTime               string                `json:"endTime" binding:"required"`
+	DurationMinutes       int                   `json:"durationMinutes" binding:"required,min=5"`
+	TotalMarks            int                   `json:"totalMarks"`
+	PassingMarks          int                   `json:"passingMarks"`
+	Instructions          string                `json:"instructions"`
+	IsActive              bool                  `json:"isActive"`
+	Questions             []OlympiadQuestionDTO `json:"questions"`
 }
 
 // BulkUploadQuestionsRequest is used for bulk uploading questions
