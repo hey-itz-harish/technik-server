@@ -82,6 +82,10 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	otpSendLimiter := middleware.NewRateLimiter(3, 1*time.Minute)
 	contactLimiter := middleware.NewRateLimiter(3, 1*time.Minute)
 
+	// Direct root routes for school profile access
+	r.GET("/school/details", authHandler.GetSchoolDetails)
+	r.GET("/school/profile", authHandler.GetSchoolDetails)
+
 	api := r.Group("/api")
 	{
 		// Admin / Technik Portal routes
