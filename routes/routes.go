@@ -224,6 +224,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			portal.GET("/olympiad/registrations", technikHandler.GetOlympiadRegistrations)
 			portal.GET("/school/olympiad/:id/certificates", olympiadTestHandler.GetSchoolCertificates)
 			portal.GET("/school/olympiad/certificates", olympiadTestHandler.GetSchoolCertificates)
+			portal.GET("/school/certificates", olympiadTestHandler.GetSchoolCertificates)
 
 			// Academic Assessment Setup & Student Evaluation Grid routes
 			portal.POST("/school/academic-assessment/create", assessmentHandler.CreateAcademicAssessment)
