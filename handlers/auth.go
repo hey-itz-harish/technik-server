@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"fmt"
 	"html"
 	"net/http"
@@ -567,14 +568,7 @@ func (h *AuthHandler) VerifyOTP(c *gin.Context) {
 		address, _ := updatedSchool.Address()
 		pincode, _ := updatedSchool.Pincode()
 		phone, _ := updatedSchool.Phone()
-		principal, _ := updatedSchool.PrincipalName()
-		coordName, _ := updatedSchool.CoordinatorName()
-		coordDesig, _ := updatedSchool.CoordinatorDesignation()
-		coordMob, _ := updatedSchool.CoordinatorMobile()
-		coordEmail, _ := updatedSchool.CoordinatorEmail()
-		if p, cn, cd, cm, ce := getCoordinatorForSchool(updatedSchool.ID); cn != "" || p != "" {
-			principal, coordName, coordDesig, coordMob, coordEmail = p, cn, cd, cm, ce
-		}
+		principal, coordName, coordDesig, coordMob, coordEmail := getCoordinatorForSchool(updatedSchool.ID)
 		cID, _ := updatedSchool.CsrfID()
 		sID, _ := updatedSchool.SessionID()
 		ip, _ := updatedSchool.IPAddress()
@@ -783,11 +777,6 @@ func (h *AuthHandler) RegisterSchool(c *gin.Context) {
 		db.SchoolDetails.Address.Set(req.Address),
 		db.SchoolDetails.Pincode.Set(req.Pincode),
 		db.SchoolDetails.Phone.Set(phoneNum),
-		db.SchoolDetails.PrincipalName.Set(req.PrincipalName),
-		db.SchoolDetails.CoordinatorName.Set(req.CoordinatorName),
-		db.SchoolDetails.CoordinatorDesignation.Set(req.CoordinatorDesignation),
-		db.SchoolDetails.CoordinatorMobile.Set(req.CoordinatorMobile),
-		db.SchoolDetails.CoordinatorEmail.Set(req.CoordinatorEmail),
 		db.SchoolDetails.IsActivated.Set(false),
 		db.SchoolDetails.IsVerified.Set(false),
 		db.SchoolDetails.ActivationToken.Set(activationToken),
@@ -1026,14 +1015,10 @@ func (h *AuthHandler) Logout(c *gin.Context) {
 					db.SchoolDetails.RememberMe.Set(false),
 				).Exec(ctx)
 			} else {
-				_, _ = database.Client.User.FindUnique(
-					db.User.ID.Equals(claims.UserID),
-				).Update(
-					db.User.IsVerified.Set(false),
-					db.User.SessionID.Set(""),
-					db.User.CsrfID.Set(""),
-					db.User.RememberMe.Set(false),
-				).Exec(ctx)
+				sqlDB := database.GetSQLDB()
+				if sqlDB != nil {
+					_, _ = sqlDB.Exec(`UPDATE "User" SET "isVerified" = false, "sessionId" = '', "csrfID" = '', "rememberMe" = false WHERE id = $1;`, claims.UserID)
+				}
 			}
 		}
 	}
@@ -1049,14 +1034,10 @@ func (h *AuthHandler) Logout(c *gin.Context) {
 			db.SchoolDetails.RememberMe.Set(false),
 		).Exec(ctx)
 
-		_, _ = database.Client.User.FindUnique(
-			db.User.Email.Equals(userEmail),
-		).Update(
-			db.User.IsVerified.Set(false),
-			db.User.SessionID.Set(""),
-			db.User.CsrfID.Set(""),
-			db.User.RememberMe.Set(false),
-		).Exec(ctx)
+		sqlDB := database.GetSQLDB()
+		if sqlDB != nil {
+			_, _ = sqlDB.Exec(`UPDATE "User" SET "isVerified" = false, "sessionId" = '', "csrfID" = '', "rememberMe" = false WHERE LOWER(email) = LOWER($1);`, userEmail)
+		}
 
 		// Record SessionLog logout entry
 		now := time.Now()
@@ -1110,14 +1091,7 @@ func (h *AuthHandler) GetMe(c *gin.Context) {
 		address, _ := school.Address()
 		pincode, _ := school.Pincode()
 		phone, _ := school.Phone()
-		principal, _ := school.PrincipalName()
-		coordName, _ := school.CoordinatorName()
-		coordDesig, _ := school.CoordinatorDesignation()
-		coordMob, _ := school.CoordinatorMobile()
-		coordEmail, _ := school.CoordinatorEmail()
-		if p, cn, cd, cm, ce := getCoordinatorForSchool(school.ID); cn != "" || p != "" {
-			principal, coordName, coordDesig, coordMob, coordEmail = p, cn, cd, cm, ce
-		}
+		principal, coordName, coordDesig, coordMob, coordEmail := getCoordinatorForSchool(school.ID)
 		cID, _ := school.CsrfID()
 		sID, _ := school.SessionID()
 		ip, _ := school.IPAddress()
@@ -1155,36 +1129,47 @@ func (h *AuthHandler) GetMe(c *gin.Context) {
 	}
 
 	// User Profile Lookup
-	user, err := database.Client.User.FindUnique(
-		db.User.ID.Equals(userID),
-	).Exec(ctx)
+	sqlDB := database.GetSQLDB()
+	if sqlDB != nil {
+		var u dto.UserResponse
+		var roleID, roleName, roleCode string
+		var csrfID, sessionID, ipAddress sql.NullString
+		var sessionExpiry sql.NullTime
+		err := sqlDB.QueryRow(`
+			SELECT u.id, u.name, u.email, COALESCE(u.role_id, ''), COALESCE(r.name, 'Admin'), COALESCE(r.code, 'ADMIN'),
+			       COALESCE(u."twoFactorEnable", false), COALESCE(u."isActivated", true), COALESCE(u."isVerified", true),
+			       u."csrfID", u."sessionId", u."ipAddress",
+			       COALESCE(u."rememberMe", false), u."sessionExpiry", u.created_at, u.updated_at
+			FROM "User" u
+			LEFT JOIN roles r ON u.role_id = r.id
+			WHERE u.id = $1;
+		`, userID).Scan(
+			&u.ID, &u.Name, &u.Email, &roleID, &roleName, &roleCode,
+			&u.TwoFactorEnable, &u.IsActivated, &u.IsVerified,
+			&csrfID, &sessionID, &ipAddress,
+			&u.RememberMe, &sessionExpiry, &u.CreatedAt, &u.UpdatedAt,
+		)
 
-	if err != nil || user == nil {
-		c.JSON(http.StatusNotFound, dto.APIError{Success: false, Error: "User profile not found"})
-		return
+		if err == nil {
+			u.Role = roleName
+			if csrfID.Valid {
+				u.CSRFID = csrfID.String
+			}
+			if sessionID.Valid {
+				u.SessionID = sessionID.String
+			}
+			if ipAddress.Valid {
+				u.IPAddress = ipAddress.String
+			}
+			if sessionExpiry.Valid {
+				u.SessionExpiry = &sessionExpiry.Time
+			}
+			c.JSON(http.StatusOK, u)
+			return
+		}
 	}
 
-	cID, _ := user.CsrfID()
-	sID, _ := user.SessionID()
-	ip, _ := user.IPAddress()
-	sExp := parseSessionExpiry(user.SessionExpiry())
-
-	c.JSON(http.StatusOK, dto.UserResponse{
-		ID:              user.ID,
-		Name:            user.Name,
-		Email:           user.Email,
-		Role:            string(user.Role),
-		TwoFactorEnable: user.TwoFactorEnable,
-		IsActivated:     user.IsActivated,
-		IsVerified:      user.IsVerified,
-		CSRFID:          cID,
-		SessionID:       sID,
-		IPAddress:       ip,
-		RememberMe:      user.RememberMe,
-		SessionExpiry:   sExp,
-		CreatedAt:       user.CreatedAt,
-		UpdatedAt:       user.UpdatedAt,
-	})
+	c.JSON(http.StatusNotFound, dto.APIError{Success: false, Error: "User profile not found"})
 }
 
 // GetSchoolDetails retrieves school details by session (JWT context or Bearer/Cookie token), schoolId, or email query param.
@@ -1274,14 +1259,7 @@ func (h *AuthHandler) GetSchoolDetails(c *gin.Context) {
 			address, _ := school.Address()
 			pincode, _ := school.Pincode()
 			phone, _ := school.Phone()
-			principal, _ := school.PrincipalName()
-			coordName, _ := school.CoordinatorName()
-			coordDesig, _ := school.CoordinatorDesignation()
-			coordMob, _ := school.CoordinatorMobile()
-			coordEmail, _ := school.CoordinatorEmail()
-			if p, cn, cd, cm, ce := getCoordinatorForSchool(school.ID); cn != "" || p != "" {
-				principal, coordName, coordDesig, coordMob, coordEmail = p, cn, cd, cm, ce
-			}
+			principal, coordName, coordDesig, coordMob, coordEmail := getCoordinatorForSchool(school.ID)
 			cID, _ := school.CsrfID()
 			sID, _ := school.SessionID()
 			ip, _ := school.IPAddress()

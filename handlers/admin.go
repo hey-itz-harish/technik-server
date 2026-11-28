@@ -43,31 +43,35 @@ func (h *AdminHandler) LoginAdmin(c *gin.Context) {
 		return
 	}
 
-	ctx := context.Background()
-	user, err := database.Client.User.FindUnique(
-		db.User.Email.Equals(req.Email),
-	).Exec(ctx)
+	sqlDB := database.GetSQLDB()
+	if sqlDB == nil {
+		c.JSON(http.StatusInternalServerError, dto.APIError{Success: false, Error: "Database connection unavailable"})
+		return
+	}
 
-	if err != nil || user == nil {
+	reqEmail := strings.TrimSpace(strings.ToLower(req.Email))
+	var userID, userName, userEmail, hashedPass, roleID string
+	var isDeleted bool
+	err := sqlDB.QueryRow(`
+		SELECT id, name, email, password, COALESCE(role_id, ''), COALESCE(deleted, false)
+		FROM "User"
+		WHERE LOWER(email) = $1;
+	`, reqEmail).Scan(&userID, &userName, &userEmail, &hashedPass, &roleID, &isDeleted)
+
+	if err != nil {
 		c.JSON(http.StatusUnauthorized, dto.APIError{Success: false, Error: "Invalid admin email or password"})
 		return
 	}
 
-	// Verify portal user is not soft-deleted
-	sqlDB := database.GetSQLDB()
-	if sqlDB != nil {
-		var isDeleted bool
-		_ = sqlDB.QueryRow(`SELECT COALESCE(deleted, false) FROM "User" WHERE id = $1;`, user.ID).Scan(&isDeleted)
-		if isDeleted {
-			c.JSON(http.StatusForbidden, dto.APIError{
-				Success: false,
-				Error:   "This portal user account has been deactivated (soft-deleted). Please contact Super Admin.",
-			})
-			return
-		}
+	if isDeleted {
+		c.JSON(http.StatusForbidden, dto.APIError{
+			Success: false,
+			Error:   "This portal user account has been deactivated (soft-deleted). Please contact Super Admin.",
+		})
+		return
 	}
 
-	if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(req.Password)); err != nil {
+	if err := bcrypt.CompareHashAndPassword([]byte(hashedPass), []byte(req.Password)); err != nil {
 		c.JSON(http.StatusUnauthorized, dto.APIError{Success: false, Error: "Invalid admin email or password"})
 		return
 	}
@@ -78,19 +82,18 @@ func (h *AdminHandler) LoginAdmin(c *gin.Context) {
 	otpCode := fmt.Sprintf("%06d", otpNum)
 	otpExpiry := time.Now().Add(10 * time.Minute)
 
-	_, _ = database.Client.User.FindUnique(
-		db.User.ID.Equals(user.ID),
-	).Update(
-		db.User.Otp.Set(otpCode),
-		db.User.OtpExpiry.Set(otpExpiry),
-	).Exec(ctx)
+	_, _ = sqlDB.Exec(`
+		UPDATE "User"
+		SET otp = $1, "otpExpiry" = $2
+		WHERE id = $3;
+	`, otpCode, otpExpiry, userID)
 
-	_ = h.zohoService.SendOTPEmail(user.Email, user.Name, otpCode)
+	_ = h.zohoService.SendOTPEmail(userEmail, userName, otpCode)
 
 	c.JSON(http.StatusOK, dto.LoginPendingResponse{
 		Success: true,
 		Message: "Admin credentials verified. OTP sent to email.",
-		Email:   user.Email,
+		Email:   userEmail,
 	})
 }
 
@@ -103,52 +106,65 @@ func (h *AdminHandler) VerifyAdminOTP(c *gin.Context) {
 		return
 	}
 
-	ctx := context.Background()
-	user, err := database.Client.User.FindUnique(
-		db.User.Email.Equals(req.Email),
-	).Exec(ctx)
+	sqlDB := database.GetSQLDB()
+	if sqlDB == nil {
+		c.JSON(http.StatusInternalServerError, dto.APIError{Success: false, Error: "Database connection unavailable"})
+		return
+	}
 
-	if err != nil || user == nil {
+	reqEmail := strings.TrimSpace(strings.ToLower(req.Email))
+	var userID, userName, userEmail, savedOtp, roleID string
+	var otpExp sql.NullTime
+	var isDeleted bool
+	var createdAt time.Time
+
+	err := sqlDB.QueryRow(`
+		SELECT id, name, email, COALESCE(otp, ''), "otpExpiry", COALESCE(role_id, ''), COALESCE(deleted, false), created_at
+		FROM "User"
+		WHERE LOWER(email) = $1;
+	`, reqEmail).Scan(&userID, &userName, &userEmail, &savedOtp, &otpExp, &roleID, &isDeleted, &createdAt)
+
+	if err != nil {
 		c.JSON(http.StatusUnauthorized, dto.APIError{Success: false, Error: "Admin user not found"})
 		return
 	}
 
-	// Verify portal user is not soft-deleted
-	sqlDB := database.GetSQLDB()
-	if sqlDB != nil {
-		var isDeleted bool
-		_ = sqlDB.QueryRow(`SELECT COALESCE(deleted, false) FROM "User" WHERE id = $1;`, user.ID).Scan(&isDeleted)
-		if isDeleted {
-			c.JSON(http.StatusForbidden, dto.APIError{
-				Success: false,
-				Error:   "This portal user account has been deactivated (soft-deleted). Please contact Super Admin.",
-			})
-			return
-		}
+	if isDeleted {
+		c.JSON(http.StatusForbidden, dto.APIError{
+			Success: false,
+			Error:   "This portal user account has been deactivated (soft-deleted). Please contact Super Admin.",
+		})
+		return
 	}
 
-	savedOtp, _ := user.Otp()
-	exp, hasExp := user.OtpExpiry()
 	now := time.Now()
-
 	if savedOtp == "" || savedOtp != strings.TrimSpace(req.OTP) {
 		c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: "Invalid OTP code"})
 		return
 	}
 
-	if !hasExp || exp.Before(now) {
+	if !otpExp.Valid || otpExp.Time.Before(now) {
 		c.JSON(http.StatusBadRequest, dto.APIError{Success: false, Error: "Admin OTP code has expired. Please log in again."})
 		return
 	}
 
 	// Invalidate OTP immediately to prevent reuse / replay attacks
-	_, _ = database.Client.User.FindUnique(
-		db.User.ID.Equals(user.ID),
-	).Update(
-		db.User.Otp.Set(""),
-	).Exec(ctx)
+	_, _ = sqlDB.Exec(`UPDATE "User" SET otp = '' WHERE id = $1;`, userID)
 
-	jwtToken, err := middleware.GenerateJWT(user.ID, user.Email, "admin", h.cfg.JWTSecret)
+	// Fetch role code and name from roles table
+	roleCode := "SUPER_ADMIN"
+	var roleName string
+	if roleID != "" {
+		_ = sqlDB.QueryRow(`SELECT code, name FROM roles WHERE id = $1 AND COALESCE(deleted, false) = false;`, roleID).Scan(&roleCode, &roleName)
+	}
+	if roleCode == "" {
+		roleCode = "SUPER_ADMIN"
+	}
+	if roleName == "" {
+		roleName = "Super Admin"
+	}
+
+	jwtToken, err := middleware.GenerateJWT(userID, userEmail, roleCode, h.cfg.JWTSecret)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, dto.APIError{Success: false, Error: "Failed to generate admin token"})
 		return
@@ -165,12 +181,13 @@ func (h *AdminHandler) VerifyAdminOTP(c *gin.Context) {
 		"token":     jwtToken,
 		"csrfToken": csrfToken,
 		"user": dto.AdminUserDTO{
-			ID:        user.ID,
-			Name:      user.Name,
-			Email:     user.Email,
-			Role:      string(user.Role),
+			ID:        userID,
+			Name:      userName,
+			Email:     userEmail,
+			Role:      roleName,
+			RoleID:    roleID,
 			Status:    "Active & Verified",
-			CreatedAt: user.CreatedAt,
+			CreatedAt: createdAt,
 		},
 	})
 }
@@ -182,7 +199,11 @@ func (h *AdminHandler) GetAdminStats(c *gin.Context) {
 
 	schools, _ := database.Client.SchoolDetails.FindMany().Exec(ctx)
 	nominations, _ := database.Client.TechnikPrideNomination.FindMany().Exec(ctx)
-	olympiadStudents, _ := database.Client.OlympiadStudent.FindMany().Exec(ctx)
+
+	olympiadStudentsCount := 0
+	if sqlDB := database.GetSQLDB(); sqlDB != nil {
+		_ = sqlDB.QueryRow(`SELECT COUNT(*) FROM "olympiadParticipants" WHERE deleted = FALSE;`).Scan(&olympiadStudentsCount)
+	}
 
 	pendingCount := 0
 	for _, nom := range nominations {
@@ -195,7 +216,7 @@ func (h *AdminHandler) GetAdminStats(c *gin.Context) {
 	c.JSON(http.StatusOK, dto.AdminStatsResponse{
 		Success:                 true,
 		TotalSchools:            len(schools),
-		TotalOlympiadStudents:   len(olympiadStudents),
+		TotalOlympiadStudents:   olympiadStudentsCount,
 		TotalPrideNominations:   len(nominations),
 		PendingPrideNominations: pendingCount,
 	})
@@ -290,22 +311,6 @@ func (h *AdminHandler) UpdatePrideNominationStatus(c *gin.Context) {
 		return
 	}
 
-	// Also sync status into StudentDetails if matching student exists
-	studentName := updated.StudentName
-	var studentWhere []db.StudentDetailsWhereParam
-	studentWhere = append(studentWhere, db.StudentDetails.StudentName.Equals(studentName))
-	if schID, ok := updated.SchoolID(); ok && schID != "" {
-		studentWhere = append(studentWhere, db.StudentDetails.SchoolID.Equals(schID))
-	}
-	matchedStudents, _ := database.Client.StudentDetails.FindMany(studentWhere...).Exec(ctx)
-	for _, st := range matchedStudents {
-		_, _ = database.Client.StudentDetails.FindUnique(
-			db.StudentDetails.ID.Equals(st.ID),
-		).Update(
-			db.StudentDetails.Status.Set(req.Status),
-		).Exec(ctx)
-	}
-
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "Nomination status updated successfully",
@@ -317,40 +322,60 @@ func (h *AdminHandler) UpdatePrideNominationStatus(c *gin.Context) {
 // GetAdminOlympiadRegistrations fetches all olympiad registered students across all schools
 func (h *AdminHandler) GetAdminOlympiadRegistrations(c *gin.Context) {
 	_ = database.EnsureConnected()
-	ctx := context.Background()
 
-	registrations, err := database.Client.OlympiadRegistration.FindMany().With(
-		db.OlympiadRegistration.School.Fetch(),
-		db.OlympiadRegistration.Students.Fetch(),
-	).OrderBy(
-		db.OlympiadRegistration.CreatedAt.Order(db.SortOrderDesc),
-	).Exec(ctx)
+	sqlDB := database.GetSQLDB()
+	if sqlDB == nil {
+		c.JSON(http.StatusInternalServerError, dto.APIError{Success: false, Error: "Database connection unavailable"})
+		return
+	}
 
+	query := `
+		SELECT 
+			op.id, op."studentName", COALESCE(op."studentId", ''), 
+			COALESCE(op."schoolName", 'Technik Partner School'), COALESCE(op."schoolCode", ''), 
+			COALESCE(op.gender, ''), COALESCE(op."olympiadTrack", 'General STEM Track'), 
+			COALESCE(s.grade, 'Grade 5'), COALESCE(s.status, 'NOT_STARTED'),
+			op."createdAt"
+		FROM "olympiadParticipants" op
+		LEFT JOIN olympiadstudentteststatus s ON op.olympiadstudentteststatusid = s.id
+		WHERE op.deleted = FALSE
+		ORDER BY op."createdAt" DESC;
+	`
+	rows, err := sqlDB.Query(query)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, dto.APIError{Success: false, Error: "Failed to fetch registrations: " + err.Error()})
 		return
 	}
+	defer rows.Close()
 
 	var results []gin.H
-	for _, reg := range registrations {
-		schName := "Technik Partner School"
-		if sch, ok := reg.School(); ok && sch != nil {
-			schName = sch.SchoolName
-		}
-
-		for _, st := range reg.Students() {
+	for rows.Next() {
+		var id, studentName, studentID, schoolName, schoolCode, gender, track, grade, testStatus string
+		var createdAt time.Time
+		if err := rows.Scan(
+			&id, &studentName, &studentID,
+			&schoolName, &schoolCode,
+			&gender, &track, &grade, &testStatus,
+			&createdAt,
+		); err == nil {
+			rollNo := studentID
+			if rollNo == "" {
+				rollNo = id
+			}
 			results = append(results, gin.H{
-				"rollNo":             st.ID,
-				"studentName":        st.StudentName,
-				"schoolName":         schName,
-				"grade":              st.Class,
-				"track":              st.OlympiadTrack,
+				"rollNo":             rollNo,
+				"studentName":        studentName,
+				"schoolName":         schoolName,
+				"schoolCode":         schoolCode,
+				"grade":              grade,
+				"track":              track,
 				"examCenter":         "Official Technik Olympiad Center",
-				"registeredDate":     st.CreatedAt.Format("02 Jan 2006"),
+				"registeredDate":     createdAt.Format("02 Jan 2006"),
 				"paymentStatus":      "Paid",
 				"verificationStatus": "Hall Ticket Issued",
-				"gender":             st.Gender,
-				"createdAt":          st.CreatedAt,
+				"gender":             gender,
+				"testStatus":         testStatus,
+				"createdAt":          createdAt,
 			})
 		}
 	}
@@ -372,13 +397,14 @@ func (h *AdminHandler) GetAdminUsers(c *gin.Context) {
 	sqlDB := database.GetSQLDB()
 	if sqlDB != nil {
 		query := `
-			SELECT id, name, email, COALESCE(role::text, 'ADMIN'), COALESCE(role_id, ''), COALESCE(role_name, ''),
-			       COALESCE(mobile, ''), COALESCE(zone, ''), COALESCE(deleted, false), deleted_at, created_at
-			FROM "User"`
+			SELECT u.id, u.name, u.email, COALESCE(u.role_id, ''), COALESCE(r.name, 'Admin'), COALESCE(r.code, 'ADMIN'),
+			       COALESCE(u.mobile, ''), COALESCE(u.zone, ''), COALESCE(u.deleted, false), u.deleted_at, u.created_at
+			FROM "User" u
+			LEFT JOIN roles r ON u.role_id = r.id`
 		if !includeDeleted {
-			query += ` WHERE COALESCE(deleted, false) = false`
+			query += ` WHERE COALESCE(u.deleted, false) = false`
 		}
-		query += ` ORDER BY created_at DESC;`
+		query += ` ORDER BY u.created_at DESC;`
 
 		rows, err := sqlDB.Query(query)
 		if err == nil {
@@ -386,20 +412,19 @@ func (h *AdminHandler) GetAdminUsers(c *gin.Context) {
 			var userDTOs []dto.AdminUserDTO
 			for rows.Next() {
 				var u dto.AdminUserDTO
-				var roleID, roleName, mobile, zone string
+				var roleID, roleName, roleCode, mobile, zone string
 				var deletedAt sql.NullTime
 
 				if err := rows.Scan(
-					&u.ID, &u.Name, &u.Email, &u.Role,
-					&roleID, &roleName, &mobile, &zone,
+					&u.ID, &u.Name, &u.Email,
+					&roleID, &roleName, &roleCode,
+					&mobile, &zone,
 					&u.Deleted, &deletedAt, &u.CreatedAt,
 				); err == nil {
 					u.RoleID = roleID
+					u.Role = roleName
 					u.Mobile = mobile
 					u.Zone = zone
-					if roleName != "" {
-						u.Role = roleName
-					}
 					if deletedAt.Valid {
 						u.DeletedAt = &deletedAt.Time
 					}
@@ -422,39 +447,16 @@ func (h *AdminHandler) GetAdminUsers(c *gin.Context) {
 		}
 	}
 
-	// Fallback to Prisma if SQL query is not executed
-	ctx := context.Background()
-	users, err := database.Client.User.FindMany().OrderBy(
-		db.User.CreatedAt.Order(db.SortOrderDesc),
-	).Exec(ctx)
-
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, dto.APIError{Success: false, Error: "Failed to fetch admin users: " + err.Error()})
-		return
-	}
-
-	var userDTOs []dto.AdminUserDTO
-	for _, u := range users {
-		userDTOs = append(userDTOs, dto.AdminUserDTO{
-			ID:        u.ID,
-			Name:      u.Name,
-			Email:     u.Email,
-			Role:      string(u.Role),
-			Status:    "Active & Verified",
-			Deleted:   false,
-			CreatedAt: u.CreatedAt,
-		})
-	}
-
 	c.JSON(http.StatusOK, dto.AdminUsersResponse{
 		Success: true,
 		Message: "Admin users fetched successfully",
-		Total:   len(userDTOs),
-		Users:   userDTOs,
+		Total:   0,
+		Users:   []dto.AdminUserDTO{},
 	})
 }
 
 // CreateAdminUser registers a new Admin / Conducting Professional with unique email validation
+// Dispatches email invitation first, and strictly only inserts into DB upon successful email dispatch!
 func (h *AdminHandler) CreateAdminUser(c *gin.Context) {
 	_ = database.EnsureConnected()
 	var req dto.CreateAdminUserRequest
@@ -463,19 +465,44 @@ func (h *AdminHandler) CreateAdminUser(c *gin.Context) {
 		return
 	}
 
-	ctx := context.Background()
+	sqlDB := database.GetSQLDB()
+	if sqlDB == nil {
+		c.JSON(http.StatusInternalServerError, dto.APIError{Success: false, Error: "Database connection unavailable"})
+		return
+	}
 
-	// Enforce Unique Email Check
-	existing, err := database.Client.User.FindUnique(
-		db.User.Email.Equals(strings.TrimSpace(req.Email)),
-	).Exec(ctx)
+	reqEmail := strings.TrimSpace(strings.ToLower(req.Email))
+	reqName := strings.TrimSpace(req.Name)
 
-	if err == nil && existing != nil {
+	// 1. Enforce Unique Email Check
+	var emailExists bool
+	_ = sqlDB.QueryRow(`SELECT EXISTS(SELECT 1 FROM "User" WHERE LOWER(email) = $1 AND COALESCE(deleted, false) = false);`, reqEmail).Scan(&emailExists)
+	if emailExists {
 		c.JSON(http.StatusConflict, dto.APIError{
 			Success: false,
 			Error:   "Username / Email already registered! An admin user with this email address already exists.",
 		})
 		return
+	}
+
+	// 2. Resolve Role details from roles table
+	roleID := strings.TrimSpace(req.RoleID)
+	var roleName, roleCode string
+	if roleID != "" {
+		_ = sqlDB.QueryRow(`SELECT name, code FROM roles WHERE id = $1 AND COALESCE(deleted, false) = false;`, roleID).Scan(&roleName, &roleCode)
+	}
+
+	if roleName == "" && req.Role != "" {
+		_ = sqlDB.QueryRow(`SELECT id, name, code FROM roles WHERE (LOWER(name) = LOWER($1) OR LOWER(code) = LOWER($1)) AND COALESCE(deleted, false) = false LIMIT 1;`, strings.TrimSpace(req.Role)).Scan(&roleID, &roleName, &roleCode)
+	}
+
+	if roleName == "" {
+		_ = sqlDB.QueryRow(`SELECT id, name, code FROM roles WHERE code = 'SUPER_ADMIN' LIMIT 1;`).Scan(&roleID, &roleName, &roleCode)
+		if roleName == "" {
+			roleName = "Super Admin"
+			roleCode = "SUPER_ADMIN"
+			roleID = "ROLE-SUPER-ADMIN"
+		}
 	}
 
 	password := req.Password
@@ -489,65 +516,49 @@ func (h *AdminHandler) CreateAdminUser(c *gin.Context) {
 		return
 	}
 
-	newUser, err := database.Client.User.CreateOne(
-		db.User.Name.Set(strings.TrimSpace(req.Name)),
-		db.User.Email.Set(strings.TrimSpace(req.Email)),
-		db.User.Password.Set(string(hashedPass)),
-		db.User.Role.Set(db.RoleAdmin),
-		db.User.IsActivated.Set(true),
-		db.User.IsVerified.Set(true),
-	).Exec(ctx)
-
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, dto.APIError{Success: false, Error: "Failed to create admin user: " + err.Error()})
+	// 3. SEND WELCOME & PASSCODE EMAIL FIRST!
+	// (Database record is only created if email dispatch succeeds, avoiding zombie accounts)
+	if err := h.zohoService.SendAdminWelcomeEmail(reqEmail, reqName, roleName, req.Zone, password); err != nil {
+		c.JSON(http.StatusInternalServerError, dto.APIError{
+			Success: false,
+			Error:   "Failed to send welcome passcode email: " + err.Error() + ". User account was NOT created in database. Please verify the email address and try again.",
+		})
 		return
 	}
 
-	roleName := req.Role
-	if roleName == "" {
-		roleName = "SUPER_ADMIN"
+	// 4. INSERT INTO DATABASE ONLY AFTER EMAIL DISPATCH SUCCEEDS!
+	newUserID := uuid.New().String()
+	now := time.Now()
+	_, err = sqlDB.Exec(`
+		INSERT INTO "User" (
+			id, name, email, password, role_id, mobile, zone,
+			"isActivated", "isVerified", deleted, created_at, updated_at
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, true, true, false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+	`, newUserID, reqName, reqEmail, string(hashedPass), roleID, strings.TrimSpace(req.Mobile), strings.TrimSpace(req.Zone))
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.APIError{
+			Success: false,
+			Error:   "Email sent, but failed to save user in database: " + err.Error(),
+		})
+		return
 	}
-
-	// Update roles/mobile/zone and ensure deleted = FALSE in SQL
-	sqlDB := database.GetSQLDB()
-	if sqlDB != nil {
-		if req.RoleID != "" && req.Role == "" {
-			var rName string
-			_ = sqlDB.QueryRow(`SELECT name FROM roles WHERE id = $1 AND portal_only = TRUE;`, req.RoleID).Scan(&rName)
-			if rName != "" {
-				roleName = rName
-			}
-		}
-
-		_, _ = sqlDB.Exec(`
-			UPDATE "User"
-			SET deleted = FALSE,
-			    deleted_at = NULL,
-			    role_id = $1,
-			    role_name = $2,
-			    mobile = $3,
-			    zone = $4
-			WHERE id = $5;
-		`, req.RoleID, roleName, strings.TrimSpace(req.Mobile), strings.TrimSpace(req.Zone), newUser.ID)
-	}
-
-	// Send Welcome & Passcode Email via Resend/Zoho using noreply@technikolympiad.com
-	_ = h.zohoService.SendAdminWelcomeEmail(newUser.Email, newUser.Name, roleName, req.Zone, password)
 
 	c.JSON(http.StatusCreated, gin.H{
 		"success": true,
 		"message": "Admin user registered and official passcode email sent successfully",
 		"user": dto.AdminUserDTO{
-			ID:        newUser.ID,
-			Name:      newUser.Name,
-			Email:     newUser.Email,
+			ID:        newUserID,
+			Name:      reqName,
+			Email:     reqEmail,
 			Mobile:    req.Mobile,
 			Role:      roleName,
-			RoleID:    req.RoleID,
+			RoleID:    roleID,
 			Zone:      req.Zone,
 			Status:    "Active & Verified",
 			Deleted:   false,
-			CreatedAt: newUser.CreatedAt,
+			CreatedAt: now,
 		},
 	})
 }
@@ -684,10 +695,9 @@ func (h *AdminHandler) AssignUserRole(c *gin.Context) {
 
 	_, err = sqlDB.Exec(`
 		UPDATE "User"
-		SET role_id = $1,
-		    role_name = $2
-		WHERE id = $3;
-	`, req.RoleID, roleName, targetID)
+		SET role_id = $1
+		WHERE id = $2;
+	`, req.RoleID, targetID)
 
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, dto.APIError{Success: false, Error: "Failed to assign role to portal user: " + err.Error()})

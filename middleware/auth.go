@@ -114,7 +114,7 @@ func AuthMiddleware(cfg *config.Config) gin.HandlerFunc {
 	}
 }
 
-// RequireAdminRole ensures only users with role "admin" can access the endpoint
+// RequireAdminRole ensures only users with Super Admin / Admin role can access the endpoint
 func RequireAdminRole() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		roleVal, exists := c.Get("userRole")
@@ -128,10 +128,11 @@ func RequireAdminRole() gin.HandlerFunc {
 		}
 
 		role, ok := roleVal.(string)
-		if !ok || (strings.ToLower(role) != "admin") {
+		roleUpper := strings.ToUpper(strings.TrimSpace(role))
+		if !ok || (roleUpper != "SUPER_ADMIN" && roleUpper != "SUPER ADMIN" && roleUpper != "ADMIN") {
 			c.JSON(http.StatusForbidden, dto.APIError{
 				Success: false,
-				Error:   "Access denied. Administrator privileges required.",
+				Error:   "Access denied. Super Administrator privileges required.",
 			})
 			c.Abort()
 			return

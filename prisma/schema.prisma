@@ -104,11 +104,6 @@ model StudentDetails {
   deletedAt        DateTime?
 }
 
-enum Role {
-  ADMIN
-  USER
-}
-
 model PortalRole {
   id          String    @id @default(uuid(7))
   name        String    @unique
@@ -132,9 +127,7 @@ model User {
   name             String
   email            String      @unique
   password         String
-  role             Role        @default(USER)
   roleId           String?     @map("role_id")
-  roleName         String?     @default("Admin") @map("role_name")
   zone             String?
   mobile           String?
   portalRole       PortalRole? @relation(fields: [roleId], references: [id])

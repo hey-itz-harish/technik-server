@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"net/http"
 	"os"
@@ -565,47 +566,40 @@ func (h *TechnikHandler) GetSchoolStudents(c *gin.Context) {
 		}
 	}
 
-	// 2. Fetch Olympiad Registrations and Olympiad Students
-	var olymRegistrations []db.OlympiadRegistrationModel
-	if schoolID != "" {
-		olymRegistrations, err = database.Client.OlympiadRegistration.FindMany(
-			db.OlympiadRegistration.SchoolID.Equals(schoolID),
-		).With(
-			db.OlympiadRegistration.Students.Fetch(),
-		).OrderBy(
-			db.OlympiadRegistration.CreatedAt.Order(db.SortOrderDesc),
-		).Exec(ctx)
-	} else {
-		olymRegistrations, err = database.Client.OlympiadRegistration.FindMany().With(
-			db.OlympiadRegistration.Students.Fetch(),
-		).OrderBy(
-			db.OlympiadRegistration.CreatedAt.Order(db.SortOrderDesc),
-		).Exec(ctx)
-	}
-
-	if err == nil {
-		for _, reg := range olymRegistrations {
-			schID, _ := reg.SchoolID()
-			for _, st := range reg.Students() {
-				category := st.OlympiadTrack
-				if category == "" {
-					category = "Robotics Olympiad"
+	// 2. Fetch Olympiad Registrations from olympiadParticipants table
+	if sqlDB := database.GetSQLDB(); sqlDB != nil {
+		q := `SELECT op.id, op."studentName", COALESCE(op.gender, ''), COALESCE(op."olympiadTrack", 'Robotics Olympiad'),
+		             COALESCE(s.grade, 'Grade 5'), op."createdAt", op."updatedAt"
+		      FROM "olympiadParticipants" op
+		      LEFT JOIN olympiadstudentteststatus s ON op.olympiadstudentteststatusid = s.id
+		      WHERE op.deleted = FALSE`
+		var rows *sql.Rows
+		if schoolID != "" {
+			q += ` AND (op."schoolCode" = (SELECT "schoolCode" FROM "SchoolDetails" WHERE id = $1 LIMIT 1)
+			         OR op."schoolName" = (SELECT "schoolName" FROM "SchoolDetails" WHERE id = $1 LIMIT 1))`
+			rows, err = sqlDB.Query(q, schoolID)
+		} else {
+			rows, err = sqlDB.Query(q)
+		}
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var id, name, gender, track, grade string
+				var cAt, uAt time.Time
+				if err := rows.Scan(&id, &name, &gender, &track, &grade, &cAt, &uAt); err == nil {
+					combined = append(combined, dto.StudentResponse{
+						ID:           id,
+						StudentName:  name,
+						Grade:        grade,
+						Category:     track,
+						Gender:       gender,
+						Status:       "Registered & Verified",
+						AcademicYear: 2026,
+						SchoolID:     schoolID,
+						CreatedAt:    cAt,
+						UpdatedAt:    uAt,
+					})
 				}
-
-				displayGrade := st.Class
-
-				combined = append(combined, dto.StudentResponse{
-					ID:           st.ID,
-					StudentName:  st.StudentName,
-					Grade:        displayGrade,
-					Category:     category,
-					Gender:       st.Gender,
-					Status:       "Registered & Verified",
-					AcademicYear: reg.AcademicYear,
-					SchoolID:     schID,
-					CreatedAt:    st.CreatedAt,
-					UpdatedAt:    st.UpdatedAt,
-				})
 			}
 		}
 	}

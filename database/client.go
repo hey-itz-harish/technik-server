@@ -1,7 +1,6 @@
 package database
 
 import (
-	"context"
 	"database/sql"
 	"log"
 	"os"
@@ -185,6 +184,10 @@ func AutoMigrateSchema() {
 			"created_at" TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
 			"updated_at" TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 		);`,
+
+		// Drop obsolete role enum and role_name fields from "User" table (role_id is the single source of truth)
+		`ALTER TABLE IF EXISTS "User" DROP COLUMN IF EXISTS "role";`,
+		`ALTER TABLE IF EXISTS "User" DROP COLUMN IF EXISTS "role_name";`,
 	}
 
 	for _, q := range alterQueries {
@@ -196,10 +199,10 @@ func AutoMigrateSchema() {
 
 // SeedSuperAdmin creates the initial Super Admin user if not existing
 func SeedSuperAdmin() {
-	if Client == nil {
+	sqlDB := GetSQLDB()
+	if sqlDB == nil {
 		return
 	}
-	ctx := context.Background()
 
 	adminEmail := os.Getenv("INITIAL_ADMIN_EMAIL")
 	if adminEmail == "" {
@@ -212,6 +215,12 @@ func SeedSuperAdmin() {
 		adminEmail = "hari@technikolympiad.com"
 	}
 
+	var exists bool
+	_ = sqlDB.QueryRow(`SELECT EXISTS(SELECT 1 FROM "User" WHERE LOWER(email) = LOWER($1));`, adminEmail).Scan(&exists)
+	if exists {
+		return
+	}
+
 	adminPassword := os.Getenv("INITIAL_ADMIN_PASSWORD")
 	if adminPassword == "" {
 		adminPassword = os.Getenv("ADMIN_PASSWORD")
@@ -219,16 +228,6 @@ func SeedSuperAdmin() {
 	if adminPassword == "" {
 		adminPassword = os.Getenv("ADMIN_INITIAL_PASSWORD")
 	}
-
-	// If admin user already exists, do nothing
-	user, err := Client.User.FindUnique(
-		db.User.Email.Equals(adminEmail),
-	).Exec(ctx)
-
-	if err == nil && user != nil {
-		return
-	}
-
 	if adminPassword == "" {
 		adminPassword = "TechnikPass#2026"
 		log.Println("Notice: Auto-seeding initial admin using development password. Please set INITIAL_ADMIN_PASSWORD.")
@@ -240,19 +239,22 @@ func SeedSuperAdmin() {
 		return
 	}
 
-	_, err = Client.User.CreateOne(
-		db.User.Name.Set("Super Admin"),
-		db.User.Email.Set(adminEmail),
-		db.User.Password.Set(string(hashedPass)),
-		db.User.Role.Set(db.RoleAdmin),
-		db.User.IsActivated.Set(true),
-		db.User.IsVerified.Set(true),
-	).Exec(ctx)
+	var superAdminRoleID string
+	_ = sqlDB.QueryRow(`SELECT id FROM roles WHERE code = 'SUPER_ADMIN' LIMIT 1;`).Scan(&superAdminRoleID)
+	if superAdminRoleID == "" {
+		superAdminRoleID = "ROLE-SUPER-ADMIN"
+	}
+
+	_, err = sqlDB.Exec(`
+		INSERT INTO "User" (id, name, email, password, role_id, "isActivated", "isVerified", deleted, created_at, updated_at)
+		VALUES (gen_random_uuid()::text, 'Super Admin', $1, $2, $3, true, true, false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		ON CONFLICT (email) DO NOTHING;
+	`, adminEmail, string(hashedPass), superAdminRoleID)
 
 	if err != nil {
 		log.Printf("Error auto-seeding Super Admin user: %v", err)
 	} else {
-		log.Printf("Successfully initialized Super Admin user (%s)!", adminEmail)
+		log.Printf("Successfully initialized Super Admin user (%s) with role_id (%s)!", adminEmail, superAdminRoleID)
 	}
 }
 
