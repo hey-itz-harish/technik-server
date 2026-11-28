@@ -76,17 +76,9 @@ func (h *TechnikHandler) GetStudentPortfolio(c *gin.Context) {
 		if errSd == nil && sd != nil {
 			studentName = sd.StudentName
 			class = sd.Grade
-			if cat, ok := sd.Category(); ok && cat != "" {
-				category = cat
-			} else {
-				category = "Academic & Innovative Excellence"
-			}
+			category = "Academic & Innovative Excellence"
 			achievementTitle = "Technik Olympiad Excellence"
-			if st, ok := sd.Status(); ok {
-				approvalStatus = st
-			} else {
-				approvalStatus = "Registered & Verified"
-			}
+			approvalStatus = "Registered & Verified"
 			if sch, ok := sd.School(); ok && sch != nil {
 				schoolName = sch.SchoolName
 				schoolID = sch.ID

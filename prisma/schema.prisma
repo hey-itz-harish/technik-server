@@ -75,6 +75,7 @@ model StudentDetails {
   grade            String
   section          String?
   rollNo           String?
+  gender           String?
   fatherName       String?
   motherName       String?
   parentPhone      String?

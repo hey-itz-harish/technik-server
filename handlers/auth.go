@@ -681,7 +681,16 @@ func (h *AuthHandler) VerifyOTP(c *gin.Context) {
 	phone, _ := updatedStudent.Phone()
 	section, _ := updatedStudent.Section()
 	rollNo, _ := updatedStudent.RollNo()
-	parentName, _ := updatedStudent.ParentName()
+	var parentName string
+	if sqlDB := database.GetSQLDB(); sqlDB != nil {
+		var father, mother string
+		_ = sqlDB.QueryRow(`SELECT COALESCE("fatherName", ''), COALESCE("motherName", '') FROM "StudentDetails" WHERE id = $1;`, updatedStudent.ID).Scan(&father, &mother)
+		if father != "" {
+			parentName = father
+		} else {
+			parentName = mother
+		}
+	}
 	parentPhone, _ := updatedStudent.ParentPhone()
 	cID, _ := updatedStudent.CsrfID()
 	sID, _ := updatedStudent.SessionID()

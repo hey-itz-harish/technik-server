@@ -251,8 +251,6 @@ func (h *TechnikHandler) NominateTechnikPride(c *gin.Context) {
 				var stParams []db.StudentDetailsSetParam
 				stParams = append(stParams,
 					db.StudentDetails.Gender.Set(nom.Gender),
-					db.StudentDetails.Category.Set("Technik Pride Award"),
-					db.StudentDetails.Status.Set("Nomination Received"),
 					db.StudentDetails.AcademicYear.Set(year),
 				)
 				if schoolID != "" {
@@ -360,8 +358,6 @@ func (h *TechnikHandler) NominateTechnikPride(c *gin.Context) {
 	var stParams []db.StudentDetailsSetParam
 	stParams = append(stParams,
 		db.StudentDetails.Gender.Set(singleReq.Gender),
-		db.StudentDetails.Category.Set("Technik Pride Award"),
-		db.StudentDetails.Status.Set("Nomination Received"),
 		db.StudentDetails.AcademicYear.Set(year),
 	)
 	if targetSchoolID != "" {
@@ -619,14 +615,8 @@ func (h *TechnikHandler) GetSchoolStudents(c *gin.Context) {
 		for _, st := range sdList {
 			schID, _ := st.SchoolID()
 			gender, _ := st.Gender()
-			category, _ := st.Category()
-			if category == "" {
-				category = "Robotics Olympiad"
-			}
-			status, _ := st.Status()
-			if status == "" {
-				status = "Registered & Verified"
-			}
+			category := "Robotics Olympiad"
+			status := "Registered & Verified"
 			acadYear, ok := st.AcademicYear()
 			if !ok || acadYear == 0 {
 				acadYear = st.CreatedAt.Year()
