@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -37,9 +38,18 @@ func main() {
 	// 5. Setup router with CORS, CSRF, Logger, Error Handler, and API routes
 	router := routes.SetupRouter(cfg)
 
-	// 6. Configure production HTTP Server with resilient timeouts
+	// 6. Configure production HTTP Server listening on 0.0.0.0:PORT
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = cfg.Port
+	}
+	if port == "" {
+		port = "8080"
+	}
+	addr := "0.0.0.0:" + port
+
 	srv := &http.Server{
-		Addr:              ":" + cfg.Port,
+		Addr:              addr,
 		Handler:           router,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
@@ -50,10 +60,10 @@ func main() {
 
 	// 7. Start HTTP Server in background goroutine
 	go func() {
-		logger.Info("Technik Go Server running on port :%s", cfg.Port)
+		log.Printf("HTTP server listening on %s", addr)
+		logger.Info("Technik Go Server running on %s", addr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Error("Server failed to start: %v", err)
-			os.Exit(1)
+			log.Fatalf("Server failed to start on %s: %v", addr, err)
 		}
 	}()
 

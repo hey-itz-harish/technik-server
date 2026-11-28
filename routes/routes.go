@@ -31,6 +31,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			"timestamp": time.Now().UTC().Format(time.RFC3339),
 		})
 	}
+	r.GET("/", healthHandler)
 	r.GET("/health", healthHandler)
 	r.GET("/api/health", healthHandler)
 

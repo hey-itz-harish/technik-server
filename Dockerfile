@@ -33,7 +33,8 @@ WORKDIR /app
 COPY --from=builder /app/server /app/server
 COPY --from=builder /app/prisma /app/prisma
 
-# Default port
+# Default ports (both 8080 and 10000 for local & Render container scanning)
 EXPOSE 8080
+EXPOSE 10000
 
 CMD ["/app/server"]

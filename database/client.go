@@ -1,6 +1,7 @@
 package database
 
 import (
+	"context"
 	"database/sql"
 	"log"
 	"os"
@@ -43,7 +44,6 @@ func GetRawDB() (*sql.DB, error) {
 // InitDB initializes and connects the Prisma Go client and raw PostgreSQL connection
 func InitDB() *db.PrismaClient {
 	mu.Lock()
-	defer mu.Unlock()
 
 	dbURL := os.Getenv("DATABASE_URL")
 	if SQLDB == nil && dbURL != "" {
@@ -59,12 +59,16 @@ func InitDB() *db.PrismaClient {
 	}
 
 	if err := Client.Prisma.Connect(); err != nil {
+		mu.Unlock()
 		log.Printf("Warning: Failed to connect to PostgreSQL database via Prisma: %v", err)
 		log.Println("Make sure PostgreSQL is running and your DATABASE_URL in .env is correct.")
 		return Client
 	}
 
 	log.Println("Successfully connected to PostgreSQL database via Prisma Client Go!")
+	// Release mutex before running schema migrations and seeding to prevent self-deadlock
+	mu.Unlock()
+
 	AutoMigrateSchema()
 	SeedSuperAdmin()
 	return Client
@@ -89,20 +93,26 @@ func GetSQLDB() *sql.DB {
 
 // AutoMigrateSchema ensures all required columns and tables exist on PostgreSQL
 func AutoMigrateSchema() {
+	log.Println("[Migration] Starting database schema migrations...")
 	EnsureCoordinatorTables()
 	EnsureOlympiadTables()
 	EnsureAcademicAssessmentTables()
 	EnsurePortalRoleTables()
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
+		log.Println("[Migration] DATABASE_URL empty, skipping alter queries.")
 		return
 	}
 
 	rawDB, err := sql.Open("postgres", dbURL)
 	if err != nil {
+		log.Printf("[Migration] Warning opening rawDB for alter queries: %v", err)
 		return
 	}
 	defer rawDB.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
 
 	alterQueries := []string{
 		// TechnikPrideNomination updates (Task 3: add studentId)
@@ -191,18 +201,23 @@ func AutoMigrateSchema() {
 	}
 
 	for _, q := range alterQueries {
-		_, _ = rawDB.Exec(q)
+		_, _ = rawDB.ExecContext(ctx, q)
 	}
 
-	log.Println("PostgreSQL database schema columns & NewsEvents table verified successfully.")
+	log.Println("[Migration] PostgreSQL database schema columns & NewsEvents table verified successfully.")
 }
 
 // SeedSuperAdmin creates the initial Super Admin user if not existing
 func SeedSuperAdmin() {
+	log.Println("[Seed] Checking/seeding initial Super Admin user...")
 	sqlDB := GetSQLDB()
 	if sqlDB == nil {
+		log.Println("[Seed] SQL database connection unavailable, skipping admin seeding.")
 		return
 	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
 
 	adminEmail := os.Getenv("INITIAL_ADMIN_EMAIL")
 	if adminEmail == "" {
@@ -216,8 +231,9 @@ func SeedSuperAdmin() {
 	}
 
 	var exists bool
-	_ = sqlDB.QueryRow(`SELECT EXISTS(SELECT 1 FROM "User" WHERE LOWER(email) = LOWER($1));`, adminEmail).Scan(&exists)
+	_ = sqlDB.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM "User" WHERE LOWER(email) = LOWER($1));`, adminEmail).Scan(&exists)
 	if exists {
+		log.Printf("[Seed] Super Admin (%s) already exists, skipping.", adminEmail)
 		return
 	}
 
@@ -240,12 +256,12 @@ func SeedSuperAdmin() {
 	}
 
 	var superAdminRoleID string
-	_ = sqlDB.QueryRow(`SELECT id FROM roles WHERE code = 'SUPER_ADMIN' LIMIT 1;`).Scan(&superAdminRoleID)
+	_ = sqlDB.QueryRowContext(ctx, `SELECT id FROM roles WHERE code = 'SUPER_ADMIN' LIMIT 1;`).Scan(&superAdminRoleID)
 	if superAdminRoleID == "" {
 		superAdminRoleID = "ROLE-SUPER-ADMIN"
 	}
 
-	_, err = sqlDB.Exec(`
+	_, err = sqlDB.ExecContext(ctx, `
 		INSERT INTO "User" (id, name, email, password, role_id, "isActivated", "isVerified", deleted, created_at, updated_at)
 		VALUES (gen_random_uuid()::text, 'Super Admin', $1, $2, $3, true, true, false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 		ON CONFLICT (email) DO NOTHING;
