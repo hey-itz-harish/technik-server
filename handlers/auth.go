@@ -860,12 +860,12 @@ func (h *AuthHandler) LoginSchool(c *gin.Context) {
 	}
 
 	if err != nil || school == nil {
-		c.JSON(http.StatusUnauthorized, dto.APIError{Success: false, Error: "Invalid school email or password"})
+		c.JSON(http.StatusUnauthorized, dto.APIError{Success: false, Error: "Account not registered"})
 		return
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(school.Password), []byte(req.Password)); err != nil {
-		c.JSON(http.StatusUnauthorized, dto.APIError{Success: false, Error: "Invalid school email or password"})
+		c.JSON(http.StatusUnauthorized, dto.APIError{Success: false, Error: "Invalid password"})
 		return
 	}
 
@@ -931,7 +931,7 @@ func (h *AuthHandler) LoginStudent(c *gin.Context) {
 	}
 
 	if err != nil || student == nil {
-		c.JSON(http.StatusUnauthorized, dto.APIError{Success: false, Error: "Invalid student credentials. Student account not found."})
+		c.JSON(http.StatusUnauthorized, dto.APIError{Success: false, Error: "Account not registered"})
 		return
 	}
 
@@ -939,7 +939,7 @@ func (h *AuthHandler) LoginStudent(c *gin.Context) {
 	if hasPass && storedPass != "" {
 		if err := bcrypt.CompareHashAndPassword([]byte(storedPass), []byte(req.Password)); err != nil {
 			if storedPass != req.Password {
-				c.JSON(http.StatusUnauthorized, dto.APIError{Success: false, Error: "Invalid student password"})
+				c.JSON(http.StatusUnauthorized, dto.APIError{Success: false, Error: "Invalid password"})
 				return
 			}
 		}

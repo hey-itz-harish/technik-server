@@ -59,7 +59,7 @@ func (h *AdminHandler) LoginAdmin(c *gin.Context) {
 	`, reqEmail).Scan(&userID, &userName, &userEmail, &hashedPass, &roleID, &isDeleted)
 
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, dto.APIError{Success: false, Error: "Invalid admin email or password"})
+		c.JSON(http.StatusUnauthorized, dto.APIError{Success: false, Error: "Account not registered"})
 		return
 	}
 
@@ -72,7 +72,7 @@ func (h *AdminHandler) LoginAdmin(c *gin.Context) {
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(hashedPass), []byte(req.Password)); err != nil {
-		c.JSON(http.StatusUnauthorized, dto.APIError{Success: false, Error: "Invalid admin email or password"})
+		c.JSON(http.StatusUnauthorized, dto.APIError{Success: false, Error: "Invalid password"})
 		return
 	}
 
